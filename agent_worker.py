@@ -362,9 +362,16 @@ async def entrypoint(ctx: JobContext):
 
     # Wait for SIP participant to connect and audio to be ready
     try:
-        participant = await ctx.wait_for_participant(identity="insurance-rep")
+        logger.info("Waiting for SIP participant to connect...")
+        participant = await asyncio.wait_for(
+            ctx.wait_for_participant(identity="insurance-rep"),
+            timeout=60.0,
+        )
         logger.info(f"SIP participant connected: {participant.identity}")
-        logger.info(f"SIP participant tracks: audio={len(participant.track_publications)}")
+        track_count = len(participant.track_publications)
+        logger.info(f"SIP participant tracks: audio={track_count}")
+        if track_count == 0:
+            logger.warning("SIP participant has no audio tracks — call may have no audio")
 
         # Focus agent input on the SIP participant's audio
         session.room_io.set_participant(participant.identity)
@@ -373,6 +380,9 @@ async def entrypoint(ctx: JobContext):
         session.generate_reply(
             instructions="Someone just picked up the phone. Greet them naturally and ask if you've reached the claims department."
         )
+    except asyncio.TimeoutError:
+        logger.error("SIP participant did not connect within 60s — call likely not answered")
+        await session.aclose()
     except RuntimeError:
         logger.warning("Session closed before greeting could be sent")
 

@@ -32,6 +32,19 @@ logger = logging.getLogger("outbound-caller")
 # Suppress noisy LiveKit SDK stream messages ("ignoring byte/text stream")
 logging.getLogger("root").setLevel(logging.WARNING)
 
+# Suppress 403 WebSocket noise from unauthenticated connection attempts
+# (browser retries every 2s before login, Railway health checks, etc.)
+class _WS403Filter(logging.Filter):
+    def filter(self, record):
+        msg = record.getMessage()
+        if "WebSocket /ws" in msg and "403" in msg:
+            return False
+        if "connection rejected (403 Forbidden)" in msg:
+            return False
+        return True
+
+logging.getLogger("uvicorn.access").addFilter(_WS403Filter())
+
 call_mgr = CallManager(config.CSV_PATH)
 connected_websockets: list[WebSocket] = []
 call_loop_task: asyncio.Task | None = None
@@ -223,6 +236,17 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     connected_websockets.append(ws)
     logger.debug(f"WebSocket connected (total: {len(connected_websockets)})")
+    # Send current state so reconnecting clients restore their view immediately
+    try:
+        await ws.send_text(json.dumps({
+            "type": "init",
+            "rows": call_mgr.get_all_rows(),
+            "stats": call_mgr.get_stats(),
+            "is_running": bool(call_loop_task and not call_loop_task.done()),
+            "is_paused": is_paused,
+        }))
+    except Exception:
+        pass
     try:
         while True:
             await ws.receive_text()

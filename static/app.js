@@ -112,6 +112,33 @@ function connectWebSocket() {
 
 function handleEvent(event) {
   switch (event.type) {
+    case "init":
+      // Restore state for reconnecting clients (page reload, tab refocus, etc.)
+      if (event.rows && event.rows.length > 0) {
+        renderQueue(event.rows);
+        startBtn.disabled = false;
+        downloadBtn.disabled = false;
+        progressContainer.style.display = "block";
+        progressText.style.display = "block";
+        if (event.stats) updateStats(event.stats);
+        const done = event.rows.filter(r =>
+          ["completed","failed","no-answer"].includes(r.call_status)
+        ).length;
+        setStatus(`${event.rows.length} claims loaded (${done} done)`);
+      }
+      if (event.is_running && !event.is_paused) {
+        startBtn.disabled = true;
+        pauseBtn.disabled = false;
+        stopBtn.disabled = false;
+        setStatus("Calls in progress…");
+      } else if (event.is_paused) {
+        startBtn.disabled = false;
+        pauseBtn.disabled = true;
+        stopBtn.disabled = false;
+        setStatus("Paused");
+      }
+      break;
+
     case "csv_loaded":
       renderQueue(event.rows);
       startBtn.disabled = false;

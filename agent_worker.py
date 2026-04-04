@@ -185,7 +185,7 @@ async def entrypoint(ctx: JobContext):
         language="en",
         smart_format=True,
         no_delay=True,
-        endpointing=300,
+        endpointing_ms=300,
     )
 
     agent = Agent(

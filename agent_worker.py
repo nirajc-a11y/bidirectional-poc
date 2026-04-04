@@ -129,22 +129,26 @@ DOS: {claim_data.get('date_of_service', 'N/A')} | CPT: {claim_data.get('procedur
 Provider: {claim_data.get('provider_name', 'N/A')} | NPI: {claim_data.get('npi', 'N/A')} | Billed: ${claim_data.get('billed_amount', 'N/A')}
 
 FLOW:
-1. "Hi, this is {name} from {org}. I'm calling about a claim — is this the claims department?"
-2. Give key info: patient name, member ID, claim number. More only if asked.
-3. "Could you check the status for me?"
-4. When they tell you the status, you MUST ask follow-up questions before saving:
-   - If approved: "What's the approved amount?" then "And the payment date?"
-   - If denied: "What's the denial reason?" then "Is there an appeal deadline?"
-   - If pending: "When do you expect it'll be processed?"
-   - Then always: "Could I get a reference number for this call?"
-5. ONLY after you have status + details + reference, call save_claim_status.
-6. Read back briefly: "So it's [status] for [amount], payment [date], ref [number] — correct?"
-7. When they say yes, call confirm_details.
-8. "Thanks so much, have a great day!"
+1. Greet: "Hi, this is {name} from {org}. Am I speaking with claims?"
+2. Give ONLY patient name and claim number first: "I have a claim for {claim_data.get('patient_name', 'N/A')}, claim number {claim_data.get('claim_number', 'N/A')}."
+   - If they need more info, give member ID, then date of service, etc. ONE piece at a time.
+3. "Could you check the status?"
+4. After they give status, ask ONE follow-up at a time:
+   - Approved → "What's the approved amount?" (wait) → "And the payment date?" (wait) → "Reference number?" (wait)
+   - Denied → "What's the reason?" (wait) → "Appeal deadline?" (wait)
+   - Pending → "When will it be processed?" (wait)
+5. Call save_claim_status with everything collected.
+6. Quick confirm: "So, approved for [amount], payment [date]. Correct?"
+7. When confirmed, call confirm_details.
+8. "Thanks, have a great day!"
 
-IMPORTANT: Do NOT call save_claim_status until you've asked about amount, date, AND reference number. Ask them one at a time.
-
-If they can't help, call mark_unable_to_verify, thank them, end call."""
+CRITICAL RULES:
+- NEVER read all patient details in one sentence. Break it up.
+- After asking a question, STOP talking and WAIT for the answer. Do NOT add filler.
+- When user answers, acknowledge briefly ("got it", "okay") then ask the NEXT question.
+- If user says something you missed, just say "Sorry, could you repeat that?"
+- Do NOT say "I'm going to wait" or "please go ahead" — just be quiet.
+- If they can't help → call mark_unable_to_verify, thank them, end call."""
 
 
 class CallTranscript:
@@ -191,16 +195,16 @@ async def entrypoint(ctx: JobContext):
         vad=silero.VAD.load(),
         tools=[save_claim_status, confirm_details, mark_unable_to_verify],
         turn_handling=TurnHandlingOptions(
-            turn_detection="stt",
+            turn_detection="vad",  # VAD-based: faster, responds to voice activity directly
             endpointing=EndpointingOptions(
-                min_delay=0.3,   # Respond faster — 300ms silence
-                max_delay=1.0,   # Max 1s wait
+                min_delay=0.3,
+                max_delay=0.8,  # Respond within 800ms max
             ),
             interruption=InterruptionOptions(
                 enabled=True,
-                mode="adaptive",
-                min_duration=0.4,  # 400ms speech to interrupt
-                min_words=2,
+                mode="vad",      # VAD-based interruption: immediate response to speech
+                min_duration=0.3,  # 300ms of speech = interrupt (very responsive)
+                min_words=1,       # Single word can interrupt
                 resume_false_interruption=True,
             ),
         ),

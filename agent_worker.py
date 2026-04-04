@@ -33,17 +33,24 @@ def get_tts():
     """TTS selection based on TTS_PROVIDER env var.
 
     Options:
-      elevenlabs - Natural voice (needs paid plan for library voices)
+      elevenlabs - Natural voice with speed control
       deepgram   - Reliable, low latency (default)
     """
-    provider = os.getenv("TTS_PROVIDER", "deepgram")
-    if provider == "elevenlabs":
+    provider = os.getenv("TTS_PROVIDER", "elevenlabs")
+    if provider == "elevenlabs" and os.getenv("ELEVEN_API_KEY"):
         return elevenlabs.TTS(
             voice_id=os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku"),
             model="eleven_turbo_v2_5",
             api_key=os.getenv("ELEVEN_API_KEY"),
+            voice_settings=elevenlabs.VoiceSettings(
+                stability=0.6,          # More natural variation
+                similarity_boost=0.8,   # Stay close to original voice
+                speed=0.85,             # Slow down 15% for clarity
+                use_speaker_boost=True, # Enhance clarity
+            ),
+            encoding="pcm_24000",       # High quality PCM
         )
-    return deepgram.TTS(model=os.getenv("TTS_VOICE", "aura-2-andromeda-en"))
+    return deepgram.TTS(model=os.getenv("TTS_VOICE", "aura-2-athena-en"))
 
 
 # --- Tools ---
@@ -105,12 +112,16 @@ def get_system_prompt(claim_data: dict) -> str:
     return f"""You are {name} from {org}, calling an insurance company about a medical claim. You sound like a real person — warm, professional, natural.
 
 VOICE RULES (critical):
-- Max 1-2 short sentences per turn. Never monologue.
+- Max 1-2 SHORT sentences per turn. Never monologue.
+- Keep each sentence under 15 words.
 - Use contractions: I'd, we're, that's, I'll, can't
+- Add natural pauses with commas and periods.
 - Natural fillers: "so", "alright", "perfect", "got it"
+- Speak clearly — pronounce each word fully, don't rush.
 - After speaking, STOP and wait. Do not keep talking.
-- If silence, wait 3+ seconds before saying anything.
+- If silence, wait patiently. Do not repeat yourself.
 - If they say "hold on" or "one moment", say "Sure" and wait silently.
+- NEVER say things like "I'm going to wait" or "Please go ahead" — just wait.
 
 CLAIM INFO:
 Patient: {claim_data.get('patient_name', 'N/A')} | Member: {claim_data.get('member_id', 'N/A')} | Claim: {claim_data.get('claim_number', 'N/A')}

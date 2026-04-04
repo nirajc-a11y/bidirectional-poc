@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime
 
 from livekit import api, rtc
@@ -20,6 +21,8 @@ from livekit.plugins import deepgram, elevenlabs, openai, silero
 
 logger = logging.getLogger("claim-agent")
 logger.setLevel(logging.INFO)
+
+_SAFE_FILENAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
 
 # --- TTS ---
@@ -167,17 +170,22 @@ async def entrypoint(ctx: JobContext):
         try:
             claim_data = json.loads(ctx.room.metadata)
         except json.JSONDecodeError:
-            pass
+            logger.warning(f"Invalid room metadata JSON in {ctx.room.name}")
 
     claim_number = claim_data.get("claim_number", "unknown")
+    if not claim_data.get("claim_number") or not claim_data.get("patient_name"):
+        logger.warning(f"Missing required claim fields (claim_number, patient_name) in room {ctx.room.name}")
     logger.info(f"Claim: {claim_number}")
     transcript = CallTranscript()
 
     # Groq — fastest model with tool calling
+    groq_key = os.getenv("GROQ_API_KEY")
+    if not groq_key:
+        logger.error("GROQ_API_KEY not set — agent cannot function")
     llm = openai.LLM(
         model=os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
         base_url="https://api.groq.com/openai/v1",
-        api_key=os.getenv("GROQ_API_KEY"),
+        api_key=groq_key,
     )
 
     agent = Agent(
@@ -254,8 +262,8 @@ async def entrypoint(ctx: JobContext):
                     topic="transcript",
                 )
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Failed to publish transcript data: {e}")
 
         # Auto-hangup when agent says goodbye
         if role == "assistant" and session.userdata.get("confirmed"):
@@ -309,7 +317,8 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"Done {claim_number}: {json.dumps(results)}")
 
     os.makedirs("call_results", exist_ok=True)
-    with open(f"call_results/{claim_number}.json", "w") as f:
+    safe_name = claim_number if _SAFE_FILENAME_RE.match(claim_number) else "unknown"
+    with open(f"call_results/{safe_name}.json", "w") as f:
         json.dump(final, f, indent=2)
 
 

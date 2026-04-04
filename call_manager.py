@@ -1,6 +1,7 @@
 import csv
 import logging
 import os
+import re
 import tempfile
 from datetime import datetime
 from threading import RLock
@@ -22,6 +23,8 @@ OUTPUT_COLUMNS = {
     "transcript_file": "",
 }
 
+_SAFE_FILENAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
+
 
 class CallManager:
     def __init__(self, csv_path: str):
@@ -32,10 +35,19 @@ class CallManager:
 
     def validate_csv(self, path: str) -> list[str]:
         """Return list of missing required columns, empty if valid."""
-        with open(path, "r", newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            headers = set(reader.fieldnames or [])
-        return sorted(REQUIRED_COLUMNS - headers)
+        try:
+            with open(path, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                headers = set(reader.fieldnames or [])
+        except Exception as e:
+            logger.error(f"Failed to read CSV for validation: {e}")
+            return list(REQUIRED_COLUMNS)
+        missing = sorted(REQUIRED_COLUMNS - headers)
+        if missing:
+            logger.warning(f"CSV validation failed — missing columns: {missing}")
+        else:
+            logger.info(f"CSV validation passed ({len(headers)} columns)")
+        return missing
 
     def load_csv(self, path: str | None = None):
         target = path or self.csv_path
@@ -77,7 +89,9 @@ class CallManager:
         with self._lock:
             for row in self.rows:
                 if row.get("call_status") == "pending":
+                    logger.info(f"Next pending claim: {row.get('claim_number')}")
                     return dict(row)
+            logger.info("No pending claims remaining")
             return None
 
     def update_row(self, claim_number: str, results: dict):
@@ -95,33 +109,38 @@ class CallManager:
         self.update_row(claim_number, {"call_status": status})
 
     def get_all_rows(self) -> list[dict]:
-        return [dict(row) for row in self.rows]
+        with self._lock:
+            return [dict(row) for row in self.rows]
 
     def get_stats(self) -> dict:
-        if not self.rows:
-            return {"total": 0}
-        stats = {
-            "total": len(self.rows),
-            "pending": sum(1 for r in self.rows if r.get("call_status") == "pending"),
-            "in_progress": sum(1 for r in self.rows if r.get("call_status") == "in-progress"),
-            "completed": sum(1 for r in self.rows if r.get("call_status") == "completed"),
-            "failed": sum(1 for r in self.rows if r.get("call_status") == "failed"),
-            "no_answer": sum(1 for r in self.rows if r.get("call_status") == "no-answer"),
-        }
-        completed = [r for r in self.rows if r.get("call_status") == "completed"]
-        if completed:
-            stats["approved"] = sum(1 for r in completed if r.get("claim_result") == "approved")
-            stats["denied"] = sum(1 for r in completed if r.get("claim_result") == "denied")
-            stats["claim_pending"] = sum(1 for r in completed if r.get("claim_result") == "pending")
-            stats["in_review"] = sum(1 for r in completed if r.get("claim_result") == "in-review")
-        return stats
+        with self._lock:
+            if not self.rows:
+                return {"total": 0}
+            stats = {
+                "total": len(self.rows),
+                "pending": sum(1 for r in self.rows if r.get("call_status") == "pending"),
+                "in_progress": sum(1 for r in self.rows if r.get("call_status") == "in-progress"),
+                "completed": sum(1 for r in self.rows if r.get("call_status") == "completed"),
+                "failed": sum(1 for r in self.rows if r.get("call_status") == "failed"),
+                "no_answer": sum(1 for r in self.rows if r.get("call_status") == "no-answer"),
+            }
+            completed = [r for r in self.rows if r.get("call_status") == "completed"]
+            if completed:
+                stats["approved"] = sum(1 for r in completed if r.get("claim_result") == "approved")
+                stats["denied"] = sum(1 for r in completed if r.get("claim_result") == "denied")
+                stats["claim_pending"] = sum(1 for r in completed if r.get("claim_result") == "pending")
+                stats["in_review"] = sum(1 for r in completed if r.get("claim_result") == "in-review")
+            return stats
 
     def save_transcript(self, claim_number: str, transcript: str, transcripts_dir: str = "transcripts"):
+        # Sanitize claim_number for safe filesystem use
+        safe_name = claim_number if _SAFE_FILENAME_RE.match(claim_number) else "unknown"
         os.makedirs(transcripts_dir, exist_ok=True)
-        filename = f"{claim_number}.txt"
+        filename = f"{safe_name}.txt"
         filepath = os.path.join(transcripts_dir, filename)
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(transcript)
+        logger.info(f"Transcript saved: {filepath}")
         self.update_row(claim_number, {
             "transcript_file": f"{transcripts_dir}/{filename}",
             "call_timestamp": datetime.now().isoformat(),

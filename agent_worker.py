@@ -5,7 +5,7 @@ import os
 from datetime import datetime
 
 from dotenv import load_dotenv
-from livekit import rtc
+from livekit import api, rtc
 from livekit.agents import (
     Agent,
     AgentSession,
@@ -30,15 +30,20 @@ logger.setLevel(logging.INFO)
 # --- TTS ---
 
 def get_tts():
-    """ElevenLabs for natural voice, Deepgram as fallback."""
-    eleven_key = os.getenv("ELEVEN_API_KEY", "")
-    if eleven_key:
+    """TTS selection based on TTS_PROVIDER env var.
+
+    Options:
+      elevenlabs - Natural voice (needs paid plan for library voices)
+      deepgram   - Reliable, low latency (default)
+    """
+    provider = os.getenv("TTS_PROVIDER", "deepgram")
+    if provider == "elevenlabs":
         return elevenlabs.TTS(
-            voice_id=os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku"),  # Lily - warm female
+            voice_id=os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku"),
             model="eleven_turbo_v2_5",
-            api_key=eleven_key,
+            api_key=os.getenv("ELEVEN_API_KEY"),
         )
-    return deepgram.TTS(model="aura-2-andromeda-en")
+    return deepgram.TTS(model=os.getenv("TTS_VOICE", "aura-2-andromeda-en"))
 
 
 # --- Tools ---
@@ -177,13 +182,13 @@ async def entrypoint(ctx: JobContext):
         turn_handling=TurnHandlingOptions(
             turn_detection="stt",
             endpointing=EndpointingOptions(
-                min_delay=0.4,
-                max_delay=1.5,
+                min_delay=0.3,   # Respond faster — 300ms silence
+                max_delay=1.0,   # Max 1s wait
             ),
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="adaptive",
-                min_duration=0.5,
+                min_duration=0.4,  # 400ms speech to interrupt
                 min_words=2,
                 resume_false_interruption=True,
             ),
@@ -194,6 +199,31 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(
         userdata={"claim_results": {}, "confirmed": False},
     )
+
+    # Auto-hangup: disconnect SIP participant after goodbye
+    async def auto_hangup_after_goodbye():
+        """Wait 3s after goodbye, then disconnect the SIP call."""
+        await asyncio.sleep(3)
+        logger.info("Auto-hangup: disconnecting SIP participant")
+        # Remove SIP participant from room to end the phone call
+        try:
+            lk_api = api.LiveKitAPI(
+                os.getenv("LIVEKIT_URL"),
+                os.getenv("LIVEKIT_API_KEY"),
+                os.getenv("LIVEKIT_API_SECRET"),
+            )
+            await lk_api.room.remove_participant(
+                api.RoomParticipantIdentity(
+                    room=ctx.room.name,
+                    identity="insurance-rep",
+                )
+            )
+            await lk_api.aclose()
+            logger.info("SIP participant removed - call ended")
+        except Exception as e:
+            logger.error(f"Failed to remove SIP participant: {e}")
+        # Then close the agent session
+        await session.aclose()
 
     @session.on("conversation_item_added")
     def on_item(event):
@@ -207,6 +237,12 @@ async def entrypoint(ctx: JobContext):
         speaker = "Agent" if role == "assistant" else "Human"
         transcript.add_entry(speaker, content)
         logger.info(f"{speaker}: {content}")
+
+        # Auto-hangup when agent says goodbye
+        if role == "assistant" and session.userdata.get("confirmed"):
+            goodbye_words = ["great day", "bye", "goodbye", "take care"]
+            if any(w in content.lower() for w in goodbye_words):
+                asyncio.create_task(auto_hangup_after_goodbye())
 
     @ctx.room.on("sip_dtmf_received")
     def on_dtmf(event):

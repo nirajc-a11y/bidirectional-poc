@@ -180,17 +180,9 @@ async def entrypoint(ctx: JobContext):
         api_key=os.getenv("GROQ_API_KEY"),
     )
 
-    stt = deepgram.STT(
-        model="nova-3",
-        language="en",
-        smart_format=True,
-        no_delay=True,
-        endpointing_ms=300,
-    )
-
     agent = Agent(
         instructions=get_system_prompt(claim_data),
-        stt=stt,
+        stt=deepgram.STT(model="nova-3", language="en"),
         llm=llm,
         tts=get_tts(),
         vad=silero.VAD.load(),

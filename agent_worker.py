@@ -27,33 +27,29 @@ logger.setLevel(logging.INFO)
 def get_tts():
     """TTS selection based on TTS_PROVIDER env var.
 
-    Options:
-      elevenlabs - Natural voice with speed control
-      deepgram   - Reliable, low latency (default)
+    ElevenLabs WebSocket streaming fails on Railway (Debian/Python 3.13)
+    so Deepgram is the default for deployed environments.
+    Set TTS_PROVIDER=elevenlabs for local development.
     """
-    provider = os.getenv("TTS_PROVIDER", "elevenlabs")
+    provider = os.getenv("TTS_PROVIDER", "deepgram")
     eleven_key = os.getenv("ELEVEN_API_KEY", "")
     if provider == "elevenlabs" and eleven_key:
-        try:
-            tts = elevenlabs.TTS(
-                voice_id=os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku"),
-                model="eleven_turbo_v2_5",
-                api_key=eleven_key,
-                encoding="pcm_16000",
-                voice_settings=elevenlabs.VoiceSettings(
-                    stability=0.6,
-                    similarity_boost=0.8,
-                    speed=0.85,
-                    use_speaker_boost=True,
-                ),
-            )
-            logger.info("TTS: ElevenLabs (pcm_16000)")
-            return tts
-        except Exception as e:
-            logger.warning(f"ElevenLabs TTS init failed, falling back to Deepgram: {e}")
-    fallback = deepgram.TTS(model=os.getenv("TTS_VOICE", "aura-2-athena-en"))
-    logger.info("TTS: Deepgram (fallback)")
-    return fallback
+        tts = elevenlabs.TTS(
+            voice_id=os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku"),
+            model="eleven_turbo_v2_5",
+            api_key=eleven_key,
+            voice_settings=elevenlabs.VoiceSettings(
+                stability=0.6,
+                similarity_boost=0.8,
+                speed=0.85,
+                use_speaker_boost=True,
+            ),
+        )
+        logger.info("TTS: ElevenLabs")
+        return tts
+    tts = deepgram.TTS(model=os.getenv("TTS_VOICE", "aura-2-athena-en"))
+    logger.info("TTS: Deepgram")
+    return tts
 
 
 # --- Tools ---

@@ -3,7 +3,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-transcripts/*.txt
+transcripts/
+call_results/
+*.log
 *.csv
 !sample_claims.csv
 .DS_Store

@@ -1,7 +1,12 @@
 import csv
+import logging
 import os
 from datetime import datetime
-from threading import Lock
+from threading import RLock
+
+logger = logging.getLogger("call-manager")
+
+REQUIRED_COLUMNS = {"patient_name", "member_id", "insurance_phone", "claim_number"}
 
 OUTPUT_COLUMNS = {
     "call_status": "pending",
@@ -20,27 +25,35 @@ OUTPUT_COLUMNS = {
 class CallManager:
     def __init__(self, csv_path: str):
         self.csv_path = csv_path
-        self._lock = Lock()
+        self._lock = RLock()
         self.rows: list[dict] = []
         self.fieldnames: list[str] = []
 
+    def validate_csv(self, path: str) -> list[str]:
+        """Return list of missing required columns, empty if valid."""
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            headers = set(reader.fieldnames or [])
+        return sorted(REQUIRED_COLUMNS - headers)
+
     def load_csv(self, path: str | None = None):
         target = path or self.csv_path
-        with open(target, "r", newline="", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            self.fieldnames = list(reader.fieldnames or [])
-            self.rows = list(reader)
+        with self._lock:
+            with open(target, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                self.fieldnames = list(reader.fieldnames or [])
+                self.rows = list(reader)
 
-        # Add output columns if missing
-        for col, default in OUTPUT_COLUMNS.items():
-            if col not in self.fieldnames:
-                self.fieldnames.append(col)
-            for row in self.rows:
-                if col not in row or not row[col]:
-                    row[col] = default
+            for col, default in OUTPUT_COLUMNS.items():
+                if col not in self.fieldnames:
+                    self.fieldnames.append(col)
+                for row in self.rows:
+                    if col not in row or not row[col]:
+                        row[col] = default
 
-        self.csv_path = target
-        self._save()
+            self.csv_path = target
+            self._save()
+            logger.info(f"Loaded CSV: {len(self.rows)} claims from {target}")
 
     def _save(self):
         if not self.rows or not self.fieldnames:
@@ -65,6 +78,7 @@ class CallManager:
                         if key in self.fieldnames:
                             row[key] = value
                     self._save()
+                    logger.info(f"Updated claim {claim_number}: {results}")
                     return
 
     def set_call_status(self, claim_number: str, status: str):

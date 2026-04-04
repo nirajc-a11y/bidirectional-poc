@@ -3,10 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#ffffff">
     <title>Outbound AI Calling System</title>
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
+    <div id="notificationArea" class="notification-area"></div>
+
     <header>
         <h1>Outbound AI Calling System</h1>
         <div class="header-controls">
@@ -20,36 +23,39 @@
         </div>
     </header>
 
-    <div class="status-bar" id="statusBar">Upload a CSV to begin</div>
+    <div class="status-bar" id="statusBar">
+        <span class="connection-dot" id="connectionDot"></span>
+        <span id="statusText">Upload a CSV to begin</span>
+    </div>
 
     <main class="panels">
-        <!-- Call Queue Panel -->
+        <!-- Call Queue -->
         <section class="panel queue-panel">
             <h2>Call Queue</h2>
+            <span class="progress-text" id="progressText" style="display:none">0 / 0</span>
             <div class="progress-bar-container" id="progressContainer" style="display:none">
                 <div class="progress-bar" id="progressBar"></div>
-                <span class="progress-text" id="progressText">0 / 0</span>
             </div>
             <div class="queue-list" id="queueList">
                 <p class="empty-state">No claims loaded</p>
             </div>
         </section>
 
-        <!-- Live Call Panel -->
+        <!-- Live Call -->
         <section class="panel live-panel">
             <h2>Live Call</h2>
             <div class="call-info" id="callInfo" style="display:none">
                 <div class="call-meta">
-                    <span class="label">Patient:</span> <span id="livePatient">-</span>
+                    <span class="label">Patient</span> <span id="livePatient">-</span>
                 </div>
                 <div class="call-meta">
-                    <span class="label">Claim #:</span> <span id="liveClaim">-</span>
+                    <span class="label">Claim</span> <span id="liveClaim">-</span>
                 </div>
                 <div class="call-meta">
-                    <span class="label">Phone:</span> <span id="livePhone">-</span>
+                    <span class="label">Phone</span> <span id="livePhone">-</span>
                 </div>
                 <div class="call-meta">
-                    <span class="label">Duration:</span> <span id="liveDuration">00:00</span>
+                    <span class="label">Duration</span> <span id="liveDuration">00:00</span>
                 </div>
             </div>
             <div class="transcript-feed" id="transcriptFeed">
@@ -57,7 +63,7 @@
             </div>
         </section>
 
-        <!-- Results Panel -->
+        <!-- Results -->
         <section class="panel results-panel">
             <h2>Results</h2>
             <div class="stats-grid" id="statsGrid">
@@ -76,6 +82,14 @@
                 <div class="stat-card stat-pending">
                     <div class="stat-value" id="statPending">0</div>
                     <div class="stat-label">Pending</div>
+                </div>
+                <div class="stat-card stat-failed">
+                    <div class="stat-value" id="statFailed">0</div>
+                    <div class="stat-label">Failed</div>
+                </div>
+                <div class="stat-card stat-no-answer">
+                    <div class="stat-value" id="statNoAnswer">0</div>
+                    <div class="stat-label">No Answer</div>
                 </div>
             </div>
             <button class="btn btn-download" id="downloadBtn" disabled>Download Updated CSV</button>

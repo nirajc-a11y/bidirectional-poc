@@ -230,6 +230,17 @@ async def entrypoint(ctx: JobContext):
         transcript.add_entry(speaker, content)
         logger.info(f"{speaker}: {content}")
 
+        # Publish transcript line to room for real-time relay to dashboard
+        try:
+            asyncio.create_task(
+                ctx.room.local_participant.publish_data(
+                    json.dumps({"speaker": speaker, "text": content}).encode(),
+                    topic="transcript",
+                )
+            )
+        except Exception:
+            pass
+
         # Auto-hangup when agent says goodbye
         if role == "assistant" and session.userdata.get("confirmed"):
             goodbye_words = ["great day", "bye", "goodbye", "take care"]
@@ -264,12 +275,15 @@ async def entrypoint(ctx: JobContext):
             for p in ctx.room.remote_participants.values():
                 if p.identity == "insurance-rep":
                     await asyncio.sleep(1)
-                    name = os.getenv("AGENT_NAME", "Sarah")
-                    org = os.getenv("PROVIDER_NAME", "ABC Medical Group")
-                    await session.say(
-                        f"Hi, this is {name} from {org}. "
-                        f"I'm calling about a claim — is this the claims department?"
-                    )
+                    try:
+                        name = os.getenv("AGENT_NAME", "Sarah")
+                        org = os.getenv("PROVIDER_NAME", "ABC Medical Group")
+                        await session.say(
+                            f"Hi, this is {name} from {org}. "
+                            f"I'm calling about a claim — is this the claims department?"
+                        )
+                    except RuntimeError:
+                        logger.warning("Session closed before greeting could be sent")
                     return
             await asyncio.sleep(0.5)
 

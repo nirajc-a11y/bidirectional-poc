@@ -4,7 +4,6 @@ import logging
 import os
 from datetime import datetime
 
-from dotenv import load_dotenv
 from livekit import api, rtc
 from livekit.agents import (
     Agent,
@@ -15,13 +14,9 @@ from livekit.agents import (
     JobContext,
     RunContext,
     TurnHandlingOptions,
-    WorkerOptions,
-    cli,
     function_tool,
 )
 from livekit.plugins import deepgram, elevenlabs, openai, silero
-
-load_dotenv()
 
 logger = logging.getLogger("claim-agent")
 logger.setLevel(logging.INFO)
@@ -109,23 +104,36 @@ def get_system_prompt(claim_data: dict) -> str:
     name = os.getenv("AGENT_NAME", "Sarah")
     org = os.getenv("PROVIDER_NAME", "ABC Medical Group")
 
-    return f"""You are {name} from {org} calling insurance about a claim. Be warm, natural, brief.
+    return f"""You are {name} from {org} calling an insurance company to verify a medical claim. Be warm, natural, and brief.
 
-RULES: Max 1 short sentence per turn. Say "got it" or "okay" then ask next question. Stop and wait after each sentence.
+RULES:
+- Max 1 short sentence per turn. Then STOP and WAIT for the other person to respond.
+- Never call any tool until you have actually spoken with the rep and collected real information from them.
+- Do NOT assume or make up any claim status, amounts, or dates. You must HEAR them from the rep first.
+- Do NOT call confirm_details until the rep verbally confirms your summary is correct.
 
-CLAIM: {claim_data.get('patient_name', 'N/A')}, Member {claim_data.get('member_id', 'N/A')}, Claim# {claim_data.get('claim_number', 'N/A')}, DOS {claim_data.get('date_of_service', 'N/A')}, CPT {claim_data.get('procedure_code', 'N/A')}, Provider {claim_data.get('provider_name', 'N/A')}, NPI {claim_data.get('npi', 'N/A')}, Billed ${claim_data.get('billed_amount', 'N/A')}
+CLAIM DETAILS:
+Patient: {claim_data.get('patient_name', 'N/A')}
+Member ID: {claim_data.get('member_id', 'N/A')}
+Claim#: {claim_data.get('claim_number', 'N/A')}
+Date of Service: {claim_data.get('date_of_service', 'N/A')}
+CPT Code: {claim_data.get('procedure_code', 'N/A')}
+Provider: {claim_data.get('provider_name', 'N/A')}
+NPI: {claim_data.get('npi', 'N/A')}
+Billed Amount: ${claim_data.get('billed_amount', 'N/A')}
 
-STEPS:
-1. "Hi, this is {name} from {org}, am I speaking with claims?"
-2. "I have a claim for {claim_data.get('patient_name', 'N/A')}, claim {claim_data.get('claim_number', 'N/A')}." More details only if asked.
-3. "Could you check the status?"
-4. One follow-up at a time: amount → date → reference number.
-5. Call save_claim_status with all info.
-6. "So, approved for [amount], payment [date], correct?"
-7. On yes → call confirm_details.
-8. "Thanks, have a great day!"
+CONVERSATION FLOW:
+1. Introduce yourself and confirm you're speaking with the claims department. Wait for response.
+2. Tell them you're calling about a claim for {claim_data.get('patient_name', 'N/A')}, claim number {claim_data.get('claim_number', 'N/A')}. Give more details only if they ask. Wait for response.
+3. Ask them to check the claim status. Wait for their answer.
+4. Ask follow-up questions ONE at a time: approved amount, payment date, reference number. Wait after each.
+5. After collecting all info from the rep, call save_claim_status with what they told you.
+6. Summarize back: "So, approved for [amount], payment on [date], is that correct?" Wait for confirmation.
+7. Only after they say yes, call confirm_details.
+8. Thank them and say goodbye.
 
-Can't help → call mark_unable_to_verify, thank them, end call. Never say "I'm going to wait". Just wait."""
+If they can't help (wrong department, can't find claim, etc.), call mark_unable_to_verify, thank them, and end the call.
+Never say "I'm going to wait" or narrate what you're doing. Just wait silently for their response."""
 
 
 class CallTranscript:
@@ -267,27 +275,23 @@ async def entrypoint(ctx: JobContext):
         logger.info("Session closed")
         session_closed.set()
 
-    await session.start(agent=agent, room=ctx.room)
+    await session.start(agent=agent, room=ctx.room, record=False)
 
-    # Greet when SIP participant connects
-    async def greet():
-        while True:
-            for p in ctx.room.remote_participants.values():
-                if p.identity == "insurance-rep":
-                    await asyncio.sleep(1)
-                    try:
-                        name = os.getenv("AGENT_NAME", "Sarah")
-                        org = os.getenv("PROVIDER_NAME", "ABC Medical Group")
-                        await session.say(
-                            f"Hi, this is {name} from {org}. "
-                            f"I'm calling about a claim — is this the claims department?"
-                        )
-                    except RuntimeError:
-                        logger.warning("Session closed before greeting could be sent")
-                    return
-            await asyncio.sleep(0.5)
+    # Wait for SIP participant to connect and audio to be ready
+    try:
+        participant = await ctx.wait_for_participant(identity="insurance-rep")
+        logger.info(f"SIP participant connected: {participant.identity}")
 
-    asyncio.create_task(greet())
+        # Explicitly subscribe to the SIP participant's audio
+        session.room_io.set_participant(participant.identity)
+
+        # Let the AI generate its greeting
+        session.generate_reply(
+            instructions="The insurance rep just answered the phone. Start with step 1: introduce yourself and ask if you're speaking with the claims department."
+        )
+    except RuntimeError:
+        logger.warning("Session closed before greeting could be sent")
+
     await session_closed.wait()
 
     # Save results
@@ -301,5 +305,3 @@ async def entrypoint(ctx: JobContext):
         json.dump(final, f, indent=2)
 
 
-if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))

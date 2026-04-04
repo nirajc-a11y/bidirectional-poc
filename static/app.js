@@ -18,6 +18,7 @@ const progressText = document.getElementById("progressText");
 const callInfo = document.getElementById("callInfo");
 const transcriptFeed = document.getElementById("transcriptFeed");
 const resultsList = document.getElementById("resultsList");
+const modalContainer = document.getElementById("modalContainer");
 
 // --- Notifications ---
 
@@ -28,6 +29,58 @@ function showNotification(message, type = "info") {
   toast.textContent = message;
   area.appendChild(toast);
   setTimeout(() => toast.remove(), 5000);
+}
+
+// --- Transcript Modal ---
+
+function openTranscriptModal(claimNumber) {
+  modalContainer.innerHTML = `
+    <div class="modal-overlay" id="modalOverlay">
+      <div class="modal">
+        <div class="modal-header">
+          <h3>Transcript - ${claimNumber}</h3>
+          <button class="modal-close" id="modalClose">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="modal-loading">Loading transcript...</div>
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById("modalClose").addEventListener("click", closeModal);
+  document.getElementById("modalOverlay").addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeModal();
+  });
+
+  // Close on Escape key
+  const onEsc = (e) => { if (e.key === "Escape") { closeModal(); document.removeEventListener("keydown", onEsc); } };
+  document.addEventListener("keydown", onEsc);
+
+  // Fetch transcript
+  fetch(`/api/transcript/${claimNumber}`)
+    .then((res) => {
+      if (!res.ok) throw new Error("Transcript not found");
+      return res.json();
+    })
+    .then((data) => {
+      const body = modalContainer.querySelector(".modal-body");
+      body.innerHTML = `<div class="modal-transcript">${escapeHtml(data.transcript)}</div>`;
+    })
+    .catch(() => {
+      const body = modalContainer.querySelector(".modal-body");
+      body.innerHTML = `<div class="modal-loading">Transcript not available</div>`;
+    });
+}
+
+function closeModal() {
+  modalContainer.innerHTML = "";
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 // --- WebSocket ---
@@ -46,9 +99,13 @@ function connectWebSocket() {
     handleEvent(data);
   };
 
-  ws.onclose = () => {
+  ws.onclose = (event) => {
     connectionDot.classList.add("disconnected");
     connectionDot.title = "Disconnected";
+    if (event.code === 4001) {
+      window.location.href = "/login";
+      return;
+    }
     setTimeout(connectWebSocket, 2000);
   };
 }
@@ -87,9 +144,6 @@ function handleEvent(event) {
       startCallTimer();
       break;
 
-    case "call_active":
-      break;
-
     case "transcript_line":
       addTranscriptLine(event.speaker, event.text);
       break;
@@ -101,7 +155,6 @@ function handleEvent(event) {
       stopCallTimer();
       setStatus(`Completed: ${event.claim_number}`);
       showNotification(`${event.claim_number}: ${event.results.claim_result || "completed"}`, "success");
-      refreshQueue();
       break;
 
     case "call_failed":
@@ -109,7 +162,6 @@ function handleEvent(event) {
       setStatus(`Call failed: ${event.claim_number}`);
       stopCallTimer();
       clearLiveCall();
-      refreshQueue();
       showNotification(`Call failed: ${event.claim_number} — ${event.reason}`, "error");
       break;
 
@@ -119,7 +171,6 @@ function handleEvent(event) {
       if (event.stats) updateStats(event.stats);
       stopCallTimer();
       clearLiveCall();
-      refreshQueue();
       showNotification(`No answer: ${event.claim_number}`, "warning");
       break;
   }
@@ -207,7 +258,6 @@ function clearLiveCall() {
 }
 
 function addTranscriptLine(speaker, text) {
-  // Remove empty state if present
   const empty = transcriptFeed.querySelector(".empty-state");
   if (empty) empty.remove();
 
@@ -224,24 +274,22 @@ function addResult(claimNumber, results) {
   const item = document.createElement("div");
   item.className = "result-item";
   const result = results.claim_result || "unknown";
-  const badgeClass =
-    result === "approved"
-      ? "completed"
-      : result === "denied"
-        ? "failed"
-        : "pending";
+
+  const detailParts = [];
+  if (results.approved_amount) detailParts.push(`Amount: ${results.approved_amount}`);
+  if (results.denial_reason && results.denial_reason !== "null") detailParts.push(`Reason: ${results.denial_reason}`);
+  if (results.reference_number && results.reference_number !== "null") detailParts.push(`Ref: ${results.reference_number}`);
+  if (results.confirmed === "true") detailParts.push("Confirmed");
+
   item.innerHTML = `
     <div class="result-header">
       <span class="claim-id">${claimNumber}</span>
-      <span class="badge badge-${badgeClass}">${result}</span>
+      <span class="badge badge-${result}">${result}</span>
     </div>
-    <div class="details">
-      ${results.approved_amount ? `Amount: $${results.approved_amount}` : ""}
-      ${results.denial_reason && results.denial_reason !== "null" ? `Reason: ${results.denial_reason}` : ""}
-      ${results.reference_number && results.reference_number !== "null" ? `Ref: ${results.reference_number}` : ""}
-      ${results.confirmed === "true" ? " | Confirmed" : ""}
+    ${detailParts.length ? `<div class="details">${detailParts.join(" &middot; ")}</div>` : ""}
+    <div class="result-actions">
+      <button class="view-transcript-btn" onclick="openTranscriptModal('${claimNumber}')">View Transcript</button>
     </div>
-    <a href="/api/transcript/${claimNumber}" target="_blank">View Transcript</a>
   `;
   resultsList.prepend(item);
 }
@@ -260,17 +308,6 @@ function stopCallTimer() {
   if (callTimer) {
     clearInterval(callTimer);
     callTimer = null;
-  }
-}
-
-async function refreshQueue() {
-  try {
-    const res = await fetch("/api/claims");
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const rows = await res.json();
-    renderQueue(rows);
-  } catch (e) {
-    showNotification("Failed to refresh queue", "error");
   }
 }
 
@@ -299,6 +336,7 @@ csvUpload.addEventListener("change", async (e) => {
     showNotification("Failed to upload CSV", "error");
     setStatus("Upload failed");
   }
+  csvUpload.value = "";
 });
 
 startBtn.addEventListener("click", async () => {
@@ -324,6 +362,9 @@ pauseBtn.addEventListener("click", async () => {
 });
 
 stopBtn.addEventListener("click", async () => {
+  if (!confirm("Stop all calls? The current call will finish but no new calls will start.")) {
+    return;
+  }
   stopBtn.disabled = true;
   pauseBtn.disabled = true;
   startBtn.disabled = false;

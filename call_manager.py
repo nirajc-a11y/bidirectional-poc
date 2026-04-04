@@ -1,6 +1,7 @@
 import csv
 import logging
 import os
+import tempfile
 from datetime import datetime
 from threading import RLock
 
@@ -58,10 +59,19 @@ class CallManager:
     def _save(self):
         if not self.rows or not self.fieldnames:
             return
-        with open(self.csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
-            writer.writeheader()
-            writer.writerows(self.rows)
+        dir_name = os.path.dirname(os.path.abspath(self.csv_path))
+        tmp_path = None
+        try:
+            fd, tmp_path = tempfile.mkstemp(suffix=".csv", dir=dir_name)
+            with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+                writer.writeheader()
+                writer.writerows(self.rows)
+            os.replace(tmp_path, self.csv_path)
+        except Exception as e:
+            logger.error(f"Failed to save CSV: {e}")
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
 
     def get_next_pending(self) -> dict | None:
         with self._lock:

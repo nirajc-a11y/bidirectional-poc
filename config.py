@@ -20,12 +20,16 @@ DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "elevenlabs")
 ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY", "")
 ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku")
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY", "")
-SARVAM_SPEAKER = os.getenv("SARVAM_SPEAKER", "amelia")
 
 # Agent
 AGENT_NAME = os.getenv("AGENT_NAME", "Sarah")
 PROVIDER_NAME = os.getenv("PROVIDER_NAME", "ABC Medical Group")
+
+# Dashboard
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+
+# Server
+PORT = int(os.getenv("PORT", "3000"))
 
 # Paths
 CSV_PATH = os.getenv("CSV_PATH", "claims.csv")

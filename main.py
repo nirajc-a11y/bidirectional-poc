@@ -1,19 +1,30 @@
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import shutil
+import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from livekit import api, rtc
+from livekit.agents import AgentServer
 
 import config
+from agent_worker import entrypoint
 from call_manager import CallManager
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 logger = logging.getLogger("outbound-caller")
 
 call_mgr = CallManager(config.CSV_PATH)
@@ -21,17 +32,115 @@ connected_websockets: list[WebSocket] = []
 call_loop_task: asyncio.Task | None = None
 is_paused = False
 is_stopped = False
+start_time = time.time()
 
+# Session secret (regenerated on restart — fine for a demo)
+SESSION_SECRET = secrets.token_hex(32)
+
+
+def make_session_token() -> str:
+    return hmac.new(
+        SESSION_SECRET.encode(), config.DASHBOARD_PASSWORD.encode(), hashlib.sha256
+    ).hexdigest()
+
+
+def verify_session(request: Request) -> bool:
+    if not config.DASHBOARD_PASSWORD:
+        return True
+    token = request.cookies.get("session")
+    if not token:
+        return False
+    expected = make_session_token()
+    return hmac.compare_digest(token, expected)
+
+
+# --- Lifespan ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global call_loop_task
     os.makedirs(config.TRANSCRIPTS_DIR, exist_ok=True)
     os.makedirs("call_results", exist_ok=True)
+
+    # Start LiveKit agent worker in-process
+    agent_server = AgentServer(
+        ws_url=config.LIVEKIT_URL,
+        api_key=config.LIVEKIT_API_KEY,
+        api_secret=config.LIVEKIT_API_SECRET,
+        port=0,
+        num_idle_processes=0,
+    )
+    agent_server.rtc_session(entrypoint)
+    is_dev = os.getenv("RAILWAY_ENVIRONMENT") is None
+    agent_task = asyncio.create_task(agent_server.run(devmode=is_dev))
+    logger.info("LiveKit agent worker started in-process")
+
     yield
+
+    # Graceful shutdown
+    if call_loop_task and not call_loop_task.done():
+        call_loop_task.cancel()
+    try:
+        await agent_server.aclose()
+    except Exception:
+        pass
+    agent_task.cancel()
+    logger.info("Shutdown complete")
 
 
 app = FastAPI(title="Outbound AI Calling System", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+# --- Auth Middleware ---
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    public_paths = {"/login", "/api/health", "/favicon.ico"}
+    if path in public_paths or path.startswith("/static/"):
+        return await call_next(request)
+    if not verify_session(request):
+        if path.startswith("/api/") or path.startswith("/ws"):
+            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+        return RedirectResponse("/login")
+    return await call_next(request)
+
+
+# --- Auth Routes ---
+
+@app.get("/login")
+async def login_page():
+    if not config.DASHBOARD_PASSWORD:
+        return RedirectResponse("/")
+    return FileResponse("static/login.html")
+
+
+@app.post("/login")
+async def login(request: Request):
+    form = await request.form()
+    password = form.get("password", "")
+    if password == config.DASHBOARD_PASSWORD:
+        response = RedirectResponse("/", status_code=303)
+        is_https = os.getenv("RAILWAY_ENVIRONMENT") is not None
+        response.set_cookie("session", make_session_token(), httponly=True, samesite="lax", secure=is_https)
+        return response
+    return FileResponse("static/login.html", status_code=401)
+
+
+@app.get("/logout")
+async def logout():
+    response = RedirectResponse("/login")
+    response.delete_cookie("session")
+    return response
 
 
 # --- WebSocket ---
@@ -39,7 +148,7 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 async def broadcast(event: dict):
     message = json.dumps(event)
     disconnected = []
-    for ws in connected_websockets:
+    for ws in list(connected_websockets):
         try:
             await ws.send_text(message)
         except Exception:
@@ -50,6 +159,13 @@ async def broadcast(event: dict):
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    # Check auth for WebSocket
+    if config.DASHBOARD_PASSWORD:
+        token = ws.cookies.get("session")
+        expected = make_session_token()
+        if not token or not hmac.compare_digest(token, expected):
+            await ws.close(code=4001, reason="Unauthorized")
+            return
     await ws.accept()
     connected_websockets.append(ws)
     try:
@@ -69,7 +185,12 @@ async def root():
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    uptime = int(time.time() - start_time)
+    return {
+        "status": "ok",
+        "uptime_seconds": uptime,
+        "claims_loaded": len(call_mgr.rows),
+    }
 
 
 REQUIRED_COLUMNS = {"patient_name", "member_id", "insurance_phone", "claim_number"}
@@ -160,7 +281,6 @@ async def download_csv():
 # --- Transcript Relay ---
 
 async def relay_transcripts(room_name: str, claim_number: str):
-    """Connect to LiveKit room and relay transcript data messages to frontend."""
     token = (
         api.AccessToken(config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET)
         .with_identity(f"monitor-{room_name}")
@@ -188,7 +308,6 @@ async def relay_transcripts(room_name: str, claim_number: str):
     try:
         await room.connect(config.LIVEKIT_URL, token)
         logger.info(f"Transcript monitor connected to room {room_name}")
-        # Stay connected until room closes
         while room.connection_state == rtc.ConnectionState.CONN_CONNECTED:
             await asyncio.sleep(1)
     except Exception as e:
@@ -217,6 +336,8 @@ async def make_sip_call(claim_data: dict, room_name: str) -> bool:
                 room_name=room_name,
                 participant_identity="insurance-rep",
                 participant_name="Insurance Representative",
+                krisp_enabled=True,
+                wait_until_answered=True,
             )
         )
         logger.info(f"SIP call dispatched to {phone_number} in room {room_name}")
@@ -228,6 +349,20 @@ async def make_sip_call(claim_data: dict, room_name: str) -> bool:
         await lk_api.aclose()
 
 
+def _read_results_file(results_path: str):
+    """Read and remove a results JSON file. Returns None if missing or corrupt."""
+    if not os.path.exists(results_path):
+        return None
+    try:
+        with open(results_path, "r") as f:
+            data = json.load(f)
+        os.remove(results_path)
+        return data
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Failed to read results file {results_path}: {e}")
+        return None
+
+
 async def wait_for_call_completion(claim_number: str, room_name: str, timeout: int = 600):
     results_path = os.path.join("call_results", f"{claim_number}.json")
     elapsed = 0
@@ -236,20 +371,16 @@ async def wait_for_call_completion(claim_number: str, room_name: str, timeout: i
     lk_api = api.LiveKitAPI(config.LIVEKIT_URL, config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET)
     try:
         while elapsed < timeout:
-            if os.path.exists(results_path):
-                with open(results_path, "r") as f:
-                    data = json.load(f)
-                os.remove(results_path)
+            data = _read_results_file(results_path)
+            if data:
                 return data
 
             try:
                 rooms = await lk_api.room.list_rooms(api.ListRoomsRequest(names=[room_name]))
                 if not rooms.rooms:
                     await asyncio.sleep(10)
-                    if os.path.exists(results_path):
-                        with open(results_path, "r") as f:
-                            data = json.load(f)
-                        os.remove(results_path)
+                    data = _read_results_file(results_path)
+                    if data:
                         return data
                     return None
             except Exception as e:
@@ -274,11 +405,9 @@ async def process_single_call(claim_data: dict):
     })
     call_mgr.set_call_status(claim_number, "in-progress")
 
-    # Remove stale results file from previous runs
     stale_results = os.path.join("call_results", f"{claim_number}.json")
     if os.path.exists(stale_results):
         os.remove(stale_results)
-        logger.info(f"Removed stale results file for {claim_number}")
 
     success = await make_sip_call(claim_data, room_name)
     if not success:
@@ -286,12 +415,10 @@ async def process_single_call(claim_data: dict):
         await broadcast({"type": "call_failed", "claim_number": claim_number, "reason": "SIP call failed"})
         return
 
-    # Start transcript relay in background
     relay_task = asyncio.create_task(relay_transcripts(room_name, claim_number))
 
     result = await wait_for_call_completion(claim_number, room_name)
 
-    # Stop transcript relay
     relay_task.cancel()
 
     if result:
@@ -335,7 +462,18 @@ async def call_processing_loop():
             await broadcast({"type": "status", "message": "All calls completed!", "stats": call_mgr.get_stats()})
             break
 
-        await process_single_call(claim_data)
+        try:
+            await process_single_call(claim_data)
+        except Exception as e:
+            claim_number = claim_data.get("claim_number", "unknown")
+            logger.error(f"Error processing call {claim_number}: {e}", exc_info=True)
+            call_mgr.set_call_status(str(claim_number), "failed")
+            await broadcast({
+                "type": "call_failed",
+                "claim_number": str(claim_number),
+                "reason": f"Unexpected error: {e}",
+            })
+
         await asyncio.sleep(2)
 
     await broadcast({"type": "status", "message": "Call processing finished", "stats": call_mgr.get_stats()})
@@ -343,4 +481,4 @@ async def call_processing_loop():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=3000)
+    uvicorn.run(app, host="0.0.0.0", port=config.PORT)

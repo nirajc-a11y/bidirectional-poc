@@ -29,6 +29,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("outbound-caller")
 
+# Suppress noisy LiveKit SDK stream messages ("ignoring byte/text stream")
+logging.getLogger("root").setLevel(logging.WARNING)
+
 call_mgr = CallManager(config.CSV_PATH)
 connected_websockets: list[WebSocket] = []
 call_loop_task: asyncio.Task | None = None

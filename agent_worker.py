@@ -110,13 +110,30 @@ async def mark_unable_to_verify(ctx: RunContext, reason: str):
     return "Noted. Thank them and say goodbye."
 
 
+@function_tool(
+    name="end_call",
+    description="End the phone call. Use when the conversation is complete, the rep asks to hang up or end the call, or the call cannot proceed.",
+)
+async def end_call(ctx: RunContext, reason: str = ""):
+    ctx.session.userdata["call_ended"] = True
+    logger.info(f"TOOL end_call: {reason}")
+    return "Call ending. Say a brief goodbye."
+
+
 # --- Prompt ---
 
 def get_system_prompt(claim_data: dict) -> str:
     name = os.getenv("AGENT_NAME", "Sarah")
     org = os.getenv("PROVIDER_NAME", "ABC Medical Group")
 
-    return f"""You are {name}, a friendly and professional representative from {org}. You're calling an insurance company to check on a medical claim. Sound natural — like a real person, not a script reader.
+    return f"""You are {name}, a friendly and professional representative from {org}. You are on a live phone call with an insurance company to check on a medical claim. Sound natural — like a real person, not a script reader.
+
+IDENTITY (NEVER BREAK):
+- You ARE on a real phone call right now. This is not a simulation.
+- NEVER say you "can't make calls" or "can't interact with the outside world."
+- NEVER break character or refer to yourself as an AI, language model, or assistant.
+- If you get interrupted mid-sentence, briefly say "Sorry, go ahead?" and wait for them to speak, then continue your point. Do NOT restart your entire message.
+- If the other person asks to end the call, says "hang up", or wants to stop, use the end_call tool immediately.
 
 VOICE & TONE:
 - Speak naturally, use contractions (I'm, we've, that's).
@@ -149,6 +166,7 @@ CALL FLOW:
 6. If they correct anything → update via save_claim_status → re-summarize.
 7. After they confirm → call confirm_details → "Thank you so much for your help. Have a great day!"
 8. If they can't help → call mark_unable_to_verify → "No problem, thanks anyway. Have a good one!"
+9. If they ask to hang up, end the call, or say goodbye → call end_call → "No problem, thanks for your time. Goodbye!"
 """
 
 
@@ -195,23 +213,23 @@ async def entrypoint(ctx: JobContext):
 
     agent = Agent(
         instructions=get_system_prompt(claim_data),
-        stt=deepgram.STT(model="nova-3", language="en"),
+        stt=deepgram.STT(model="nova-3", language="en",no_delay=True,smart_format=True,punctuate=True),
         llm=llm,
         tts=get_tts(),
         vad=silero.VAD.load(),
-        tools=[save_claim_status, confirm_details, mark_unable_to_verify],
+        tools=[save_claim_status, confirm_details, mark_unable_to_verify, end_call],
         turn_handling=TurnHandlingOptions(
             turn_detection="vad",
             endpointing=EndpointingOptions(
-                min_delay=0.4,
-                max_delay=1.0,
+                min_delay=0.5,
+                max_delay=1.5,
             ),
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",
-                min_duration=0.5,
-                min_words=2,
-                resume_false_interruption=True,
+                min_duration=1.0,
+                min_words=3,
+                resume_false_interruption=False,
             ),
         ),
         allow_interruptions=True,
@@ -220,11 +238,23 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(
         userdata={"claim_results": {}, "confirmed": False},
     )
+    hangup_scheduled = False
 
     # Auto-hangup: disconnect SIP participant after goodbye
     async def auto_hangup_after_goodbye():
-        """Wait 3s after goodbye, then disconnect the SIP call."""
-        await asyncio.sleep(3)
+        """Wait for TTS to finish, then disconnect the SIP call."""
+        nonlocal hangup_scheduled
+        if hangup_scheduled:
+            return  # Prevent duplicate hangup tasks
+        hangup_scheduled = True
+
+        # Wait for all pending TTS speech to finish playing
+        try:
+            await session.drain()
+            logger.info("Speech drained, proceeding with hangup")
+        except Exception as e:
+            logger.warning(f"Drain failed, falling back to delay: {e}")
+            await asyncio.sleep(4)
         logger.info("Auto-hangup: disconnecting SIP participant")
         # Remove SIP participant from room to end the phone call
         try:
@@ -270,9 +300,9 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.debug(f"Failed to publish transcript data: {e}")
 
-        # Auto-hangup when agent says goodbye
-        if role == "assistant" and session.userdata.get("confirmed"):
-            goodbye_words = ["great day", "bye", "goodbye", "take care"]
+        # Auto-hangup when agent says goodbye (after confirm or end_call)
+        if role == "assistant" and (session.userdata.get("confirmed") or session.userdata.get("call_ended")):
+            goodbye_words = ["great day", "bye", "goodbye", "take care", "good one"]
             if any(w in content.lower() for w in goodbye_words):
                 asyncio.create_task(auto_hangup_after_goodbye())
 

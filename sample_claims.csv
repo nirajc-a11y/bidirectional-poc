@@ -1,2 +1,4 @@
 patient_name,member_id,group_number,insurance_phone,claim_number,date_of_service,procedure_code,diagnosis_code,provider_name,npi,billed_amount
 Rahul Sharma,MEM-10001,GRP-500,+919422571198,CLM-2025-001,2025-03-15,99213,J06.9,Dr. Priya Patel,1234567890,15000.00
+Anita Deshmukh,MEM-10002,GRP-500,+919422571198,CLM-2025-002,2025-03-18,99214,M54.5,Dr. Suresh Kulkarni,2345678901,22000.00
+

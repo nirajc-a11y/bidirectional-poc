@@ -33,20 +33,27 @@ def get_tts():
     """
     provider = os.getenv("TTS_PROVIDER", "elevenlabs")
     eleven_key = os.getenv("ELEVEN_API_KEY", "")
-    logger.info(f"TTS provider={provider}, ELEVEN_API_KEY set={bool(eleven_key)}, key_length={len(eleven_key)}")
     if provider == "elevenlabs" and eleven_key:
-        return elevenlabs.TTS(
-            voice_id=os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku"),
-            model="eleven_turbo_v2_5",
-            api_key=eleven_key,
-            voice_settings=elevenlabs.VoiceSettings(
-                stability=0.6,
-                similarity_boost=0.8,
-                speed=0.85,
-                use_speaker_boost=True,
-            ),
-        )
-    return deepgram.TTS(model=os.getenv("TTS_VOICE", "aura-2-athena-en"))
+        try:
+            tts = elevenlabs.TTS(
+                voice_id=os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku"),
+                model="eleven_turbo_v2_5",
+                api_key=eleven_key,
+                encoding="pcm_16000",
+                voice_settings=elevenlabs.VoiceSettings(
+                    stability=0.6,
+                    similarity_boost=0.8,
+                    speed=0.85,
+                    use_speaker_boost=True,
+                ),
+            )
+            logger.info("TTS: ElevenLabs (pcm_16000)")
+            return tts
+        except Exception as e:
+            logger.warning(f"ElevenLabs TTS init failed, falling back to Deepgram: {e}")
+    fallback = deepgram.TTS(model=os.getenv("TTS_VOICE", "aura-2-athena-en"))
+    logger.info("TTS: Deepgram (fallback)")
+    return fallback
 
 
 # --- Tools ---

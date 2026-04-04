@@ -96,14 +96,32 @@ async def trigger_call():
                     print("  Room closed - call completed")
                     break
 
-        # Check results
+        # Wait for agent to write results
         results_path = os.path.join("call_results", "CLM-2025-001.json")
+        for _ in range(10):
+            if os.path.exists(results_path):
+                break
+            await asyncio.sleep(2)
+
         if os.path.exists(results_path):
             with open(results_path, "r") as f:
                 data = json.load(f)
             print(f"\n[5] RESULTS:")
             print(f"  Results: {json.dumps(data.get('results', {}), indent=2)}")
             print(f"\n  Transcript:\n{data.get('transcript', 'No transcript')}")
+
+            # Update CSV with results
+            from call_manager import CallManager
+            cm = CallManager("claims.csv")
+            cm.load_csv()
+            call_results = data.get("results", {})
+            call_results["call_status"] = "completed"
+            cm.update_row("CLM-2025-001", call_results)
+            # Save transcript
+            transcript_text = data.get("transcript", "")
+            if transcript_text:
+                cm.save_transcript("CLM-2025-001", transcript_text)
+            print("\n[6] CSV updated with results!")
         else:
             print(f"\n[5] No results file found at {results_path}")
 

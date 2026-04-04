@@ -163,7 +163,7 @@ class CallTranscript:
 
 async def entrypoint(ctx: JobContext):
     logger.info(f"Joining room: {ctx.room.name}")
-    await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
+    await ctx.connect(auto_subscribe=AutoSubscribe.SUBSCRIBE_ALL)
 
     claim_data = {}
     if ctx.room.metadata:
@@ -297,8 +297,9 @@ async def entrypoint(ctx: JobContext):
     try:
         participant = await ctx.wait_for_participant(identity="insurance-rep")
         logger.info(f"SIP participant connected: {participant.identity}")
+        logger.info(f"SIP participant tracks: audio={len(participant.track_publications)}")
 
-        # Explicitly subscribe to the SIP participant's audio
+        # Focus agent input on the SIP participant's audio
         session.room_io.set_participant(participant.identity)
 
         # Let the AI generate its greeting

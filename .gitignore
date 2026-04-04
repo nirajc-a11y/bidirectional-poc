@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+transcripts/*.txt
+*.csv
+!sample_claims.csv
+.DS_Store

@@ -40,12 +40,11 @@ def get_tts():
             model="eleven_turbo_v2_5",
             api_key=eleven_key,
             voice_settings=elevenlabs.VoiceSettings(
-                stability=0.6,          # More natural variation
-                similarity_boost=0.8,   # Stay close to original voice
-                speed=0.85,             # Slow down 15% for clarity
-                use_speaker_boost=True, # Enhance clarity
+                stability=0.6,
+                similarity_boost=0.8,
+                speed=0.85,
+                use_speaker_boost=True,
             ),
-            encoding="pcm_24000",       # High quality PCM
         )
     return deepgram.TTS(model=os.getenv("TTS_VOICE", "aura-2-athena-en"))
 

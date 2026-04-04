@@ -32,11 +32,13 @@ def get_tts():
       deepgram   - Reliable, low latency (default)
     """
     provider = os.getenv("TTS_PROVIDER", "elevenlabs")
-    if provider == "elevenlabs" and os.getenv("ELEVEN_API_KEY"):
+    eleven_key = os.getenv("ELEVEN_API_KEY", "")
+    logger.info(f"TTS provider={provider}, ELEVEN_API_KEY set={bool(eleven_key)}, key_length={len(eleven_key)}")
+    if provider == "elevenlabs" and eleven_key:
         return elevenlabs.TTS(
             voice_id=os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku"),
             model="eleven_turbo_v2_5",
-            api_key=os.getenv("ELEVEN_API_KEY"),
+            api_key=eleven_key,
             voice_settings=elevenlabs.VoiceSettings(
                 stability=0.6,          # More natural variation
                 similarity_boost=0.8,   # Stay close to original voice

@@ -13,33 +13,112 @@ from livekit.agents import (
     EndpointingOptions,
     InterruptionOptions,
     JobContext,
+    RunContext,
     TurnHandlingOptions,
     WorkerOptions,
     cli,
+    function_tool,
 )
 from livekit.plugins import deepgram, openai, silero
 
-# Using Deepgram for TTS (native LiveKit plugin, most reliable)
+from sarvam_tts import SarvamTTS
 
 load_dotenv()
 
 logger = logging.getLogger("claim-agent")
 logger.setLevel(logging.INFO)
 
+# --- Voice Configuration ---
+VOICE_MODE = os.getenv("VOICE_MODE", "indian")  # "indian" or "global"
+
+
+def get_tts():
+    """Get TTS based on VOICE_MODE."""
+    if VOICE_MODE == "indian":
+        return SarvamTTS(
+            api_key=os.getenv("SARVAM_API_KEY"),
+            model="bulbul:v3",
+            speaker=os.getenv("SARVAM_SPEAKER", "amelia"),
+            pace=1.1,
+        )
+    else:
+        return deepgram.TTS(model="aura-2-andromeda-en")
+
+
+# --- Tool Calling ---
+# These tools let the LLM structure data during the conversation
+
+@function_tool(
+    name="save_claim_status",
+    description="Save the claim verification result after collecting all information from the insurance representative. Call this ONCE you have gathered the claim status and all relevant details.",
+)
+async def save_claim_status(
+    ctx: RunContext,
+    claim_result: str,
+    approved_amount: str = "",
+    denial_reason: str = "",
+    payment_date: str = "",
+    appeal_deadline: str = "",
+    reference_number: str = "",
+    processing_date: str = "",
+    notes: str = "",
+):
+    """Save claim result — called by the AI during conversation."""
+    result = {
+        "claim_result": claim_result,
+        "approved_amount": approved_amount,
+        "denial_reason": denial_reason,
+        "payment_date": payment_date,
+        "appeal_deadline": appeal_deadline,
+        "reference_number": reference_number,
+        "processing_date": processing_date,
+        "notes": notes,
+    }
+    # Store in session userdata for later retrieval
+    ctx.session.userdata["claim_results"] = result
+    logger.info(f"Tool called - save_claim_status: {json.dumps(result, indent=2)}")
+    return f"Claim result saved: {claim_result}. Now please confirm the details with the representative and close the call."
+
+
+@function_tool(
+    name="confirm_details",
+    description="Mark that the insurance representative has confirmed the details are correct. Call this after they confirm verbally or press 1.",
+)
+async def confirm_details(ctx: RunContext, confirmed: bool = True):
+    """Mark confirmation received."""
+    ctx.session.userdata["confirmed"] = confirmed
+    logger.info(f"Tool called - confirm_details: confirmed={confirmed}")
+    return "Confirmation recorded. Thank the representative and end the call politely."
+
+
+@function_tool(
+    name="mark_unable_to_verify",
+    description="Call this if the insurance representative cannot find the claim, cannot provide information, or the call cannot be completed for any reason.",
+)
+async def mark_unable_to_verify(ctx: RunContext, reason: str):
+    """Mark that verification could not be completed."""
+    ctx.session.userdata["claim_results"] = {
+        "claim_result": "unknown",
+        "notes": reason,
+    }
+    logger.info(f"Tool called - mark_unable_to_verify: {reason}")
+    return "Noted. Thank the representative for their time and end the call politely."
+
+
+# --- System Prompt ---
 
 def get_system_prompt(claim_data: dict) -> str:
     agent_name = os.getenv("AGENT_NAME", "Sarah")
     provider_name = os.getenv("PROVIDER_NAME", "ABC Medical Group")
 
-    return f"""You are {agent_name}, a warm and professional medical claims representative calling from {provider_name}. You sound natural, friendly, and confident — like a real person making a work call, not a robot reading a script.
+    return f"""You are {agent_name}, a warm and professional medical claims representative calling from {provider_name}. You sound natural, friendly, and confident — like a real person making a work call.
 
 ## Your personality
 - Speak naturally with contractions ("I'd like", "we're calling", "that's great")
-- Use filler words occasionally ("so", "alright", "great", "perfect")
-- Keep sentences short — 1-2 sentences max per turn
+- Use conversational fillers occasionally ("so", "alright", "great", "perfect")
+- Keep sentences SHORT — 1-2 sentences max per turn. This is critical.
 - Wait for the other person to finish before speaking
 - Be patient and polite, never rushed
-- If someone sounds confused, slow down and clarify
 
 ## Claim you're calling about
 - Patient: {claim_data.get('patient_name', 'N/A')}
@@ -55,35 +134,36 @@ def get_system_prompt(claim_data: dict) -> str:
 
 ## How the conversation should go
 
-1. GREET: Start with something like "Hi, this is {agent_name} calling from {provider_name}. I'm calling to check on a claim status. Am I speaking with someone in the claims department?"
+1. GREET: "Hi, this is {agent_name} from {provider_name}. I'm calling to check on a claim status — am I speaking with the claims department?"
 
-2. PROVIDE DETAILS: Don't dump all details at once. Start with the key ones:
-   "Great, so I have a claim for patient {claim_data.get('patient_name', 'N/A')}, member ID {claim_data.get('member_id', 'N/A')}, claim number {claim_data.get('claim_number', 'N/A')}."
-   Then provide date of service, procedure code, provider details only if asked or needed.
+2. PROVIDE KEY DETAILS: Don't dump everything at once. Start with:
+   "I have a claim for patient {claim_data.get('patient_name', 'N/A')}, member ID {claim_data.get('member_id', 'N/A')}, claim number {claim_data.get('claim_number', 'N/A')}."
+   Give more details only if asked.
 
-3. ASK ABOUT STATUS: "Could you let me know the current status of this claim?"
-   Then based on their response, ask follow-up questions naturally:
-   - If approved: "That's great. What's the approved amount? And do you have an expected payment date?"
-   - If denied: "I see. Could you tell me the denial reason? And is there an appeal deadline?"
-   - If pending: "Okay. Any idea when it might be processed?"
-   - Always: "And could I get a reference number for this call?"
+3. ASK STATUS: "Could you check the current status of this claim?"
+   Follow up naturally based on response:
+   - Approved → "Great, what's the approved amount and expected payment date?"
+   - Denied → "I see. What's the denial reason and appeal deadline?"
+   - Pending → "When might it be processed?"
+   - Always → "Could I get a reference number for this call?"
 
-4. CONFIRM: Read back what you heard naturally: "Alright, so just to make sure I have everything right — the claim is [status], [details]. Does that sound correct? You can press 1 to confirm or just say yes."
+4. SAVE RESULTS: Once you have the information, call the `save_claim_status` tool with all the details you collected.
 
-5. CLOSE: "Perfect, thank you so much for your help. Have a great day!"
+5. CONFIRM: Read back what you heard: "Just to confirm — the claim is [status], [key details]. Is that correct?"
+   When they confirm, call the `confirm_details` tool.
 
-## If they can't find the claim or don't have info
-- Be understanding: "No problem, I understand."
+6. CLOSE: "Thank you so much for your help. Have a great day!"
+
+## If they can't find the claim
+- Be understanding: "No problem at all."
 - Ask if there's another way to look it up
-- If they truly can't help, politely thank them and end the call
+- If they truly can't help, call `mark_unable_to_verify` with the reason, thank them, and end the call
 
 ## Critical rules
-- NEVER speak for more than 2 sentences at a time
+- NEVER speak more than 2 sentences at a time
 - ALWAYS pause and let them respond
-- If you hear silence, wait — don't repeat yourself immediately
-- If they say "hold on" or "one moment", just say "Sure, take your time" and wait silently
-- At the END of the conversation, include this JSON in your final response (the system will extract it):
-  {{"claim_result": "approved/denied/pending/in-review/unknown", "approved_amount": "", "denial_reason": "", "payment_date": "", "appeal_deadline": "", "reference_number": ""}}
+- Use the tools to save results — do NOT output raw JSON
+- If they say "hold on", just say "Sure, take your time" and wait
 """
 
 
@@ -91,7 +171,6 @@ class CallTranscript:
     def __init__(self):
         self.entries: list[str] = []
         self.start_time = datetime.now()
-        self.collected_data: dict = {}
 
     def add_entry(self, speaker: str, text: str):
         elapsed = (datetime.now() - self.start_time).total_seconds()
@@ -121,11 +200,10 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"Processing claim: {claim_number}")
 
     transcript = CallTranscript()
-    confirmation_received = False
 
-    # Groq LLM — use llama-3.1-8b-instant for speed
+    # LLM — Groq with fast model
     groq_llm = openai.LLM(
-        model="llama-3.1-8b-instant",
+        model="llama-3.3-70b-versatile",
         base_url="https://api.groq.com/openai/v1",
         api_key=os.getenv("GROQ_API_KEY"),
     )
@@ -134,28 +212,29 @@ async def entrypoint(ctx: JobContext):
         instructions=get_system_prompt(claim_data),
         stt=deepgram.STT(),
         llm=groq_llm,
-        tts=deepgram.TTS(model="aura-2-andromeda-en"),
+        tts=get_tts(),
         vad=silero.VAD.load(),
+        tools=[save_claim_status, confirm_details, mark_unable_to_verify],
         turn_handling=TurnHandlingOptions(
             endpointing=EndpointingOptions(
-                min_delay=0.6,   # Wait at least 0.6s of silence before responding
-                max_delay=1.5,   # Max wait before responding
+                min_delay=0.5,
+                max_delay=1.5,
             ),
             interruption=InterruptionOptions(
                 enabled=True,
-                mode="vad",       # Use VAD-based interruption (more reliable on phone)
-                min_duration=0.8, # Only interrupt if user speaks for 0.8s+
-                min_words=3,      # Need at least 3 words to count as interruption
+                mode="vad",
+                min_duration=0.8,
+                min_words=3,
             ),
         ),
         allow_interruptions=True,
-        min_endpointing_delay=0.5,
-        max_endpointing_delay=1.5,
     )
 
-    session = AgentSession()
+    session = AgentSession(
+        userdata={"claim_results": {}, "confirmed": False},
+    )
 
-    # Track conversation via conversation_item_added
+    # Track conversation
     @session.on("conversation_item_added")
     def on_conversation_item(event):
         item = event.item
@@ -175,17 +254,6 @@ async def entrypoint(ctx: JobContext):
         if role == "assistant":
             transcript.add_entry("Agent", content)
             logger.info(f"Agent: {content}")
-
-            # Extract JSON results from agent messages
-            if "{" in content and "claim_result" in content:
-                try:
-                    json_start = content.index("{")
-                    json_end = content.rindex("}") + 1
-                    result_data = json.loads(content[json_start:json_end])
-                    transcript.collected_data.update(result_data)
-                    logger.info(f"Extracted results: {result_data}")
-                except (json.JSONDecodeError, ValueError):
-                    pass
         elif role == "user":
             transcript.add_entry("Human", content)
             logger.info(f"Human: {content}")
@@ -193,19 +261,17 @@ async def entrypoint(ctx: JobContext):
     # DTMF handling
     @ctx.room.on("sip_dtmf_received")
     def on_sip_dtmf(event):
-        nonlocal confirmation_received
         digit = event.digit if hasattr(event, "digit") else str(event)
         logger.info(f"DTMF received: {digit}")
         if digit == "1":
-            confirmation_received = True
+            session.userdata["confirmed"] = True
             transcript.add_entry("System", "DTMF confirmation received (digit 1)")
 
     @ctx.room.on("participant_attributes_changed")
     def on_attributes_changed(changed_attributes: dict[str, str], participant: rtc.Participant):
-        nonlocal confirmation_received
         dtmf_digit = changed_attributes.get("sip.dtmf")
         if dtmf_digit == "1":
-            confirmation_received = True
+            session.userdata["confirmed"] = True
             transcript.add_entry("System", "DTMF confirmation received (digit 1)")
             logger.info("DTMF confirmation received via SIP attributes")
 
@@ -220,21 +286,21 @@ async def entrypoint(ctx: JobContext):
     # Start session
     await session.start(agent=agent, room=ctx.room)
 
-    # Wait for SIP participant, then greet after Twilio trial message
+    # Wait for SIP participant, then greet
     async def wait_and_greet():
         while True:
             participants = ctx.room.remote_participants
             for p in participants.values():
                 if p.identity == "insurance-rep":
-                    logger.info("SIP participant connected, waiting for Twilio trial message...")
-                    await asyncio.sleep(8)
+                    logger.info("SIP participant connected...")
+                    await asyncio.sleep(1)
                     logger.info("Sending greeting...")
                     agent_name = os.getenv("AGENT_NAME", "Sarah")
                     provider_name = os.getenv("PROVIDER_NAME", "ABC Medical Group")
                     await session.say(
-                        f"Hi, this is {agent_name} calling from {provider_name}. "
+                        f"Hi, this is {agent_name} from {provider_name}. "
                         f"I'm calling to check on a claim status. "
-                        f"Am I speaking with someone who can help me with that?"
+                        f"Am I speaking with the claims department?"
                     )
                     return
             await asyncio.sleep(0.5)
@@ -244,9 +310,9 @@ async def entrypoint(ctx: JobContext):
     # Wait for call to end
     await session_closed.wait()
 
-    # Save results
-    results = transcript.collected_data
-    results["confirmed"] = str(confirmation_received).lower()
+    # Gather results from tool calls
+    results = session.userdata.get("claim_results", {})
+    results["confirmed"] = str(session.userdata.get("confirmed", False)).lower()
 
     final_data = {
         "claim_number": claim_number,
@@ -255,6 +321,7 @@ async def entrypoint(ctx: JobContext):
     }
     logger.info(f"Call completed for claim {claim_number}: {json.dumps(results, indent=2)}")
 
+    # Write results file
     results_dir = "call_results"
     os.makedirs(results_dir, exist_ok=True)
     results_path = os.path.join(results_dir, f"{claim_number}.json")

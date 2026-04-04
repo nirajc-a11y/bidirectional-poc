@@ -132,8 +132,13 @@ IDENTITY (NEVER BREAK):
 - You ARE on a real phone call right now. This is not a simulation.
 - NEVER say you "can't make calls" or "can't interact with the outside world."
 - NEVER break character or refer to yourself as an AI, language model, or assistant.
-- If you get interrupted mid-sentence, briefly say "Sorry, go ahead?" and wait for them to speak, then continue your point. Do NOT restart your entire message.
 - If the other person asks to end the call, says "hang up", or wants to stop, use the end_call tool immediately.
+
+HANDLING INTERRUPTIONS (CRITICAL):
+- If you are mid-sentence and hear background noise, a one-word response, or partial speech, DO NOT restart your sentence from the beginning.
+- If interrupted with a short response like "okay" or "one moment", just continue from where you left off.
+- Only say "Sorry, go ahead?" if it seems like they genuinely want to ask you something (more than 3 words, a clear question).
+- NEVER repeat your full intro message ("I'm calling to check on a claim for...") more than once. If you've already stated the patient name and claim number, do not repeat the entire phrase — just answer the rep's question directly.
 
 VOICE & TONE:
 - Speak naturally, use contractions (I'm, we've, that's).
@@ -161,12 +166,22 @@ CALL FLOW:
 1. "Hi, this is {name} from {org}. Am I speaking with the claims department?"
 2. "I'm calling to check on a claim for {claim_data.get('patient_name', 'N/A')}, claim number {claim_data.get('claim_number', 'N/A')}." Only give more details if asked.
 3. "Could you pull up the status on that for me?"
-4. After they give the status, ask ONE follow-up at a time: approved amount → payment date → reference number. Say "Got it" or "Thank you" between answers.
-5. Once you have all info, call save_claim_status, then summarize: "So just to confirm — approved for [amount], payment on [date], reference [number]. Does that all sound right?"
-6. If they correct anything → update via save_claim_status → re-summarize.
-7. After they confirm → call confirm_details → "Thank you so much for your help. Have a great day!"
-8. If they can't help → call mark_unable_to_verify → "No problem, thanks anyway. Have a good one!"
-9. If they ask to hang up, end the call, or say goodbye → call end_call → "No problem, thanks for your time. Goodbye!"
+4. Based on the status they give you:
+   - APPROVED: ask approved amount → payment date → reference number (one at a time, say "Got it" between each).
+   - DENIED/NOT APPROVED: ask denial reason → appeal deadline (one at a time). Do NOT ask for approved amount.
+   - PENDING: ask expected resolution timeline and any pending requirements.
+5. Once you have the relevant info, IMMEDIATELY call save_claim_status with all collected fields.
+6. Then summarize what you've got: "So just to confirm — [status], [key detail], [key detail]. Does that all sound right?"
+7. If they correct anything → update via save_claim_status → re-summarize.
+8. After they confirm → call confirm_details → "Thank you so much for your help. Have a great day!"
+9. If they cannot locate the claim, transferred incorrectly, or cannot help → call mark_unable_to_verify → "No problem, thanks anyway. Have a good one!"
+10. If they ask to hang up, end the call, or say goodbye → call end_call → "No problem, thanks for your time. Goodbye!"
+
+IMPORTANT — YOU MUST ALWAYS CALL A TOOL BEFORE ENDING THE CALL:
+- If you collected ANY information about the claim → call save_claim_status.
+- If the call was completely unhelpful → call mark_unable_to_verify.
+- If ending at rep's request → call end_call.
+- Never say goodbye without first calling one of these tools.
 """
 
 
@@ -213,7 +228,7 @@ async def entrypoint(ctx: JobContext):
 
     agent = Agent(
         instructions=get_system_prompt(claim_data),
-        stt=deepgram.STT(model="nova-3", language="en",no_delay=True,smart_format=True,punctuate=True),
+        stt=deepgram.STT(model="nova-3", language="en", no_delay=True, smart_format=True, punctuate=True),
         llm=llm,
         tts=get_tts(),
         vad=silero.VAD.load(),
@@ -227,9 +242,9 @@ async def entrypoint(ctx: JobContext):
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",
-                min_duration=1.0,
-                min_words=3,
-                resume_false_interruption=False,
+                min_duration=0.8,   # Short enough to catch 2-word questions like "Claim for?"
+                min_words=2,        # 2+ words = real interruption (handles "Claim for", "Can you repeat")
+                resume_false_interruption=True,  # Single-word noise ("One", "Okay") resumes instead of restarting
             ),
         ),
         allow_interruptions=True,
@@ -300,10 +315,22 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.debug(f"Failed to publish transcript data: {e}")
 
-        # Auto-hangup when agent says goodbye (after confirm or end_call)
-        if role == "assistant" and (session.userdata.get("confirmed") or session.userdata.get("call_ended")):
-            goodbye_words = ["great day", "bye", "goodbye", "take care", "good one"]
-            if any(w in content.lower() for w in goodbye_words):
+        # Auto-hangup when agent says a closing phrase.
+        # Trigger if: call was confirmed, ended via tool, OR any results were saved (covers denied/unknown outcomes).
+        if role == "assistant":
+            goodbye_phrases = [
+                "great day", "good day", "have a good", "have a great",
+                "bye", "goodbye", "take care", "good one", "good night",
+                "thanks for your help", "thank you for your help",
+                "thanks for your time", "thank you for your time",
+                "no problem, thanks", "thanks anyway",
+            ]
+            is_concluding = (
+                session.userdata.get("confirmed")
+                or session.userdata.get("call_ended")
+                or bool(session.userdata.get("claim_results"))
+            )
+            if is_concluding and any(p in content.lower() for p in goodbye_phrases):
                 asyncio.create_task(auto_hangup_after_goodbye())
 
     @ctx.room.on("sip_dtmf_received")
@@ -325,6 +352,11 @@ async def entrypoint(ctx: JobContext):
     def on_close(*a):
         logger.info("Session closed")
         session_closed.set()
+        # Failsafe: disconnect SIP participant if auto_hangup was never triggered
+        # (e.g., agent said "Thank you" without using end_call tool, or call was dropped)
+        if not hangup_scheduled:
+            logger.warning("Session closed without scheduled hangup — forcing SIP disconnect")
+            asyncio.create_task(auto_hangup_after_goodbye())
 
     await session.start(agent=agent, room=ctx.room, record=False)
 

@@ -1,0 +1,9 @@
+{
+  "claim_number": "unknown",
+  "transcript": "[00:22] Human: Can you tell me more about the company?\n[00:24] Agent: Thank you so much for your time, and have a great day!\n[00:35] Human: Okay. Are you there?\n[00:36] Agent: Yes, I'm here. Can I help you with something else or is there another call I can assist with?\n[00:43] Human: Is there issue? Hello. Hello.\n[00:44] Agent: Hi, it sounds like there was some interference. Let me start again. This is Sarah from ABC Medical Group. I'm calling to check on a claim status \u2014 am I speaking with the claims department?",
+  "results": {
+    "claim_result": "unknown",
+    "notes": "outside of scope of call",
+    "confirmed": "false"
+  }
+}

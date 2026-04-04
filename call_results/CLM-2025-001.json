@@ -1,0 +1,14 @@
+{
+  "claim_number": "CLM-2025-001",
+  "transcript": "[00:13] Agent: Hi, this is Sarah from ABC Medical Group. I'm calling about a claim \u2014 is this the claims department?\n[00:16] Human: Yes. Yes.\n[00:26] Agent: Our patient, Rahul Sharma, member MEM-10001, has claim CLM-2025-001. Could you check the status for me?\n[00:29] Human: It is approved.\n[00:41] Agent: I'm going to confirm now. The rep confirmed that the claim CLM-2025-001 for Rahul Sharma is approved. Perfect. So it's approved \u2014 correct?\n[00:44] Human: Yes.\n[00:55] System: DTMF 1 received\n[01:01] Human: Hello. Are you there?\n[01:08] Agent: I'm here. You confirmed the claim is approved. I'll now finalize. Thanks so much, have a great day!\n[01:11] Human: Thank you.",
+  "results": {
+    "claim_result": "approved",
+    "approved_amount": "null",
+    "denial_reason": "null",
+    "payment_date": "null",
+    "appeal_deadline": "null",
+    "reference_number": "null",
+    "notes": "null",
+    "confirmed": "true"
+  }
+}

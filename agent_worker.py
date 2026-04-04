@@ -21,6 +21,11 @@ from livekit.plugins import deepgram, elevenlabs, openai, silero
 
 logger = logging.getLogger("claim-agent")
 logger.setLevel(logging.INFO)
+logger.propagate = False
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
+    logger.addHandler(_handler)
 
 _SAFE_FILENAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 

@@ -1,10 +1,30 @@
-"""Sarvam AI TTS plugin for LiveKit Agents v1.5.x."""
+"""Sarvam AI Bulbul v3 TTS plugin for LiveKit Agents v1.5.x.
+
+Bulbul v3 is optimized for telephony and Indian English.
+Top-rated voices: priya, amelia, sophia, niharika, kavya, ishita
+"""
 import base64
 import os
 import struct
 
 import aiohttp
 from livekit.agents import DEFAULT_API_CONNECT_OPTIONS, tts, utils
+
+# Recommended voices by use case
+VOICES = {
+    # Female voices - natural Indian English
+    "priya": "Professional, warm female voice - best for telephony",
+    "amelia": "Clear, confident female voice - good for English",
+    "sophia": "Friendly, approachable female voice",
+    "kavya": "Soft, pleasant female voice",
+    "ishita": "Energetic, clear female voice",
+    "niharika": "Natural, calm female voice",
+    "shreya": "Warm, professional female voice",
+    # Male voices
+    "aditya": "Professional male voice",
+    "rahul": "Clear, friendly male voice",
+    "varun": "Deep, confident male voice",
+}
 
 
 class SarvamTTS(tts.TTS):
@@ -13,10 +33,10 @@ class SarvamTTS(tts.TTS):
         *,
         api_key: str | None = None,
         model: str = "bulbul:v3",
-        speaker: str = "amelia",
+        speaker: str = "priya",
         target_language_code: str = "en-IN",
-        pace: float = 1.1,
-        sample_rate: int = 22050,
+        pace: float = 1.0,
+        sample_rate: int = 8000,  # 8kHz for telephony (bulbul v3 optimized)
     ):
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=False),
@@ -106,13 +126,12 @@ class SarvamChunkedStream(tts.ChunkedStream):
 
             audio_bytes = base64.b64decode(audios[0])
 
-            # Extract PCM data from WAV
+            # Parse WAV header for sample rate + extract PCM
+            wav_sample_rate = self._target_sample_rate
             if audio_bytes[:4] == b"RIFF":
-                # Read WAV header to get sample rate
                 wav_sample_rate = struct.unpack("<I", audio_bytes[24:28])[0]
-                # Find data chunk
                 pos = 12
-                pcm_data = audio_bytes[44:]  # fallback
+                pcm_data = audio_bytes[44:]
                 while pos < len(audio_bytes) - 8:
                     chunk_id = audio_bytes[pos : pos + 4]
                     chunk_size = struct.unpack("<I", audio_bytes[pos + 4 : pos + 8])[0]
@@ -122,9 +141,7 @@ class SarvamChunkedStream(tts.ChunkedStream):
                     pos += 8 + chunk_size
             else:
                 pcm_data = audio_bytes
-                wav_sample_rate = self._target_sample_rate
 
-            # Initialize emitter with raw PCM format
             output_emitter.initialize(
                 request_id=utils.shortuuid(),
                 sample_rate=wav_sample_rate,

@@ -390,7 +390,12 @@ async def entrypoint(ctx: JobContext):
         role = getattr(item, "role", "unknown")
         content = ""
         if hasattr(item, "content") and item.content:
-            content = item.content if isinstance(item.content, str) else " ".join(str(c) for c in item.content)
+            if isinstance(item.content, str):
+                content = item.content
+            else:
+                # content is list[str | ImageContent | AudioContent | Instructions]
+                # Only extract plain string parts to avoid repr noise like "[][]"
+                content = " ".join(c for c in item.content if isinstance(c, str))
         if not content.strip():
             return
         speaker = "Agent" if role == "assistant" else "Human"

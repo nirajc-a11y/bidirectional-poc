@@ -5,6 +5,8 @@ import os
 import re
 from datetime import datetime
 
+import config
+
 from livekit import api, rtc
 from livekit.agents import (
     Agent,
@@ -399,6 +401,26 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             logger.warning(f"[{call_id}] Failed to publish transcript data: {e}")
 
+        # IVR loop detection — detect repeated prompts and trigger escape
+        if role != "assistant" and session.userdata.get("mode", "ivr") == "ivr":
+            normalized = re.sub(r"[^\w\s]", "", content.lower()).strip()
+            if normalized and normalized in ivr_prompt_history[-3:]:
+                nonlocal escape_attempts
+                escape_attempts += 1
+                logger.warning(f"[{call_id}] IVR loop detected (escape attempt {escape_attempts})")
+                if escape_attempts <= config.IVR_MAX_ESCAPE_ATTEMPTS:
+                    asyncio.create_task(session.generate_reply(
+                        instructions="You are stuck in a loop — the same prompt repeated. Press 0 now using send_dtmf('0'). If that fails, say 'representative' out loud."
+                    ))
+                else:
+                    asyncio.create_task(session.generate_reply(
+                        instructions="IVR escape failed after multiple attempts. Call declare_ivr_failed with the reason."
+                    ))
+            elif normalized:
+                ivr_prompt_history.append(normalized)
+                if len(ivr_prompt_history) > 10:
+                    ivr_prompt_history.pop(0)
+
         # Auto-hangup when agent says a closing phrase.
         # Trigger if: call was confirmed, ended via tool, OR any results were saved (covers denied/unknown outcomes).
         if role == "assistant":
@@ -420,6 +442,20 @@ async def entrypoint(ctx: JobContext):
                     goodbye_said = True
                     asyncio.create_task(auto_hangup_after_goodbye())
 
+        # Mode transition: swap to claim script when human mode first activates
+        if role == "assistant" and session.userdata.get("mode") == "human":
+            if not session.userdata.get("human_mode_initialized"):
+                session.userdata["human_mode_initialized"] = True
+                ivr_end_str = session.userdata.get("ivr_end_time")
+                if ivr_end_str:
+                    nonlocal ivr_end_time
+                    try:
+                        ivr_end_time = datetime.fromisoformat(ivr_end_str)
+                    except ValueError:
+                        pass
+                agent.instructions = get_system_prompt(claim_data)
+                logger.info(f"[{call_id}] Switched to human mode — claim script active")
+
     @ctx.room.on("sip_dtmf_received")
     def on_dtmf(event):
         digit = getattr(event, "digit", str(event))
@@ -438,6 +474,23 @@ async def entrypoint(ctx: JobContext):
         if participant.identity == "insurance-rep" and not hangup_scheduled and not drop_handled:
             logger.warning(f"[{call_id}] SIP participant disconnected unexpectedly")
             asyncio.create_task(handle_dropped_call())
+
+    async def ivr_timeout_watchdog():
+        """Give up on IVR navigation after IVR_TIMEOUT_SECONDS."""
+        await asyncio.sleep(config.IVR_TIMEOUT_SECONDS)
+        if session.userdata.get("mode", "ivr") != "ivr":
+            return  # Already in human mode
+        logger.warning(f"[{call_id}] IVR timeout after {config.IVR_TIMEOUT_SECONDS}s")
+        await session.generate_reply(
+            instructions=f"{config.IVR_TIMEOUT_SECONDS} seconds have passed. Try pressing 0 or saying 'representative' one final time. If it still doesn't work, call declare_ivr_failed('timeout after {config.IVR_TIMEOUT_SECONDS}s')."
+        )
+        # Hard timeout: force failure if still in IVR mode after 30 more seconds
+        await asyncio.sleep(30)
+        if session.userdata.get("mode", "ivr") == "ivr":
+            logger.error(f"[{call_id}] IVR hard timeout — forcing failure")
+            session.userdata["claim_results"] = {"claim_result": "ivr-failed", "notes": "hard timeout"}
+            session.userdata["call_ended"] = True
+            await session.aclose()
 
     session_closed = asyncio.Event()
 
@@ -479,6 +532,7 @@ async def entrypoint(ctx: JobContext):
     except RuntimeError:
         logger.warning("Session closed before greeting could be sent")
 
+    asyncio.create_task(ivr_timeout_watchdog())
     await session_closed.wait()
 
     # Save results atomically (write .tmp then rename to prevent partial reads)

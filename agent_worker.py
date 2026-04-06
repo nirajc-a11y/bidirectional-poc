@@ -571,9 +571,9 @@ async def entrypoint(ctx: JobContext):
 
             asyncio.create_task(_force_disconnect())
 
-    await session.start(agent=agent, room=ctx.room, record=False)
-
-    # Wait for SIP participant to connect and audio to be ready
+    # Wait for SIP participant to connect and audio to be ready BEFORE starting the session.
+    # set_participant must be called before session.start() so the VAD/STT pipeline
+    # subscribes to the correct audio track from the beginning.
     try:
         logger.info("Waiting for SIP participant to connect...")
         participant = await asyncio.wait_for(
@@ -585,7 +585,6 @@ async def entrypoint(ctx: JobContext):
         logger.info(f"SIP participant tracks: audio={track_count}")
         if track_count == 0:
             logger.warning("SIP participant has no audio tracks — waiting up to 3s for audio to arrive")
-            # SIP audio tracks often arrive slightly after the participant joins
             deadline = asyncio.get_event_loop().time() + 3.0
             while asyncio.get_event_loop().time() < deadline:
                 await asyncio.sleep(0.25)
@@ -596,15 +595,14 @@ async def entrypoint(ctx: JobContext):
             else:
                 logger.warning("SIP participant still has no audio tracks after 3s — call may have no audio")
 
-        # Focus agent input on the SIP participant's audio
+        # Focus agent input on the SIP participant's audio BEFORE starting the session
         session.room_io.set_participant(participant.identity)
-        # Do NOT call generate_reply here — let the IVR/human speak first.
-        # The VAD/STT pipeline will trigger the agent naturally when audio arrives.
     except asyncio.TimeoutError:
         logger.error("SIP participant did not connect within 60s — call likely not answered")
         await session.aclose()
-    except RuntimeError:
-        logger.warning("Session closed before greeting could be sent")
+        return
+
+    await session.start(agent=agent, room=ctx.room, record=False)
 
     watchdog_task = asyncio.create_task(ivr_timeout_watchdog())
     await session_closed.wait()

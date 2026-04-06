@@ -595,14 +595,16 @@ async def entrypoint(ctx: JobContext):
             else:
                 logger.warning("SIP participant still has no audio tracks after 3s — call may have no audio")
 
-        # Focus agent input on the SIP participant's audio BEFORE starting the session
-        session.room_io.set_participant(participant.identity)
     except asyncio.TimeoutError:
         logger.error("SIP participant did not connect within 60s — call likely not answered")
         await session.aclose()
         return
 
     await session.start(agent=agent, room=ctx.room, record=False)
+
+    # Focus agent input on the SIP participant's audio — must be after session.start()
+    # so that room_io is initialized with a room reference.
+    session.room_io.set_participant(participant.identity)
 
     watchdog_task = asyncio.create_task(ivr_timeout_watchdog())
     await session_closed.wait()

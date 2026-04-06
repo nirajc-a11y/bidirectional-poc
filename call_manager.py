@@ -2,6 +2,7 @@ import csv
 import logging
 import os
 import re
+import shutil
 import tempfile
 from datetime import datetime
 from threading import RLock
@@ -51,6 +52,11 @@ class CallManager:
 
     def load_csv(self, path: str | None = None):
         target = path or self.csv_path
+        bak_path = target + ".bak"
+        # Recover from backup if primary is missing but backup exists
+        if not os.path.exists(target) and os.path.exists(bak_path):
+            logger.warning(f"CSV missing, recovering from backup: {bak_path}")
+            shutil.copy2(bak_path, target)
         with self._lock:
             with open(target, "r", newline="", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
@@ -74,6 +80,11 @@ class CallManager:
         dir_name = os.path.dirname(os.path.abspath(self.csv_path))
         tmp_path = None
         try:
+            # Write backup before modifying
+            bak_path = self.csv_path + ".bak"
+            if os.path.exists(self.csv_path):
+                shutil.copy2(self.csv_path, bak_path)
+
             fd, tmp_path = tempfile.mkstemp(suffix=".csv", dir=dir_name)
             with os.fdopen(fd, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=self.fieldnames)
@@ -123,6 +134,9 @@ class CallManager:
                 "completed": sum(1 for r in self.rows if r.get("call_status") == "completed"),
                 "failed": sum(1 for r in self.rows if r.get("call_status") == "failed"),
                 "no_answer": sum(1 for r in self.rows if r.get("call_status") == "no-answer"),
+                "retrying": sum(1 for r in self.rows if r.get("call_status") == "retrying"),
+                "ivr_failed": sum(1 for r in self.rows if r.get("call_status") == "ivr-failed"),
+                "dropped": sum(1 for r in self.rows if r.get("call_status") == "dropped"),
             }
             completed = [r for r in self.rows if r.get("call_status") == "completed"]
             if completed:

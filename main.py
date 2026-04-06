@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import time
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -53,6 +54,13 @@ call_loop_task: asyncio.Task | None = None
 is_paused = False
 is_stopped = False
 start_time = time.time()
+
+def _handle_sigterm(*_):
+    global is_stopped
+    logger.info("SIGTERM received — will stop after current call completes")
+    is_stopped = True
+
+signal.signal(signal.SIGTERM, _handle_sigterm)
 
 # Session secret — set SESSION_SECRET env var in prod for stable sessions across restarts
 SESSION_SECRET = config.SESSION_SECRET
@@ -135,9 +143,16 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Graceful shutdown
+    # Graceful shutdown — wait up to 30s for current call to finish
     if call_loop_task and not call_loop_task.done():
-        call_loop_task.cancel()
+        logger.info("Waiting up to 30s for current call to finish...")
+        try:
+            await asyncio.wait_for(call_loop_task, timeout=30.0)
+        except asyncio.TimeoutError:
+            logger.warning("Call did not finish in 30s, cancelling")
+            call_loop_task.cancel()
+        except asyncio.CancelledError:
+            pass
     try:
         await agent_server.aclose()
     except Exception:

@@ -430,6 +430,11 @@ async def entrypoint(ctx: JobContext):
         # Auto-hangup when agent says a closing phrase.
         # Trigger if: call was confirmed, ended via tool, OR any results were saved (covers denied/unknown outcomes).
         if role == "assistant":
+            # If goodbye already said, suppress any further agent speech immediately
+            if goodbye_said:
+                asyncio.create_task(session.interrupt())
+                return
+
             goodbye_phrases = [
                 "great day", "good day", "have a good", "have a great",
                 "bye", "goodbye", "take care", "good one", "good night",
@@ -448,8 +453,8 @@ async def entrypoint(ctx: JobContext):
                     goodbye_said = True
                     asyncio.create_task(auto_hangup_after_goodbye())
 
-        # Mode transition: swap to claim script when human mode first activates
-        if role == "assistant" and session.userdata.get("mode") == "human":
+        # Mode transition: swap to claim script as soon as human mode is set (any item role)
+        if session.userdata.get("mode") == "human":
             if not session.userdata.get("human_mode_initialized"):
                 session.userdata["human_mode_initialized"] = True
                 ivr_end_str = session.userdata.get("ivr_end_time")
@@ -459,7 +464,7 @@ async def entrypoint(ctx: JobContext):
                         ivr_end_time = datetime.fromisoformat(ivr_end_str)
                     except ValueError:
                         pass
-                agent.instructions = get_system_prompt(claim_data)
+                agent.update_instructions(get_system_prompt(claim_data))
                 logger.info(f"[{call_id}] Switched to human mode — claim script active")
 
     @ctx.room.on("sip_dtmf_received")

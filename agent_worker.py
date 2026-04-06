@@ -138,7 +138,7 @@ async def send_dtmf(ctx: RunContext, digit: str):
     if digit not in "0123456789*#":
         return f"Invalid digit '{digit}'. Must be 0-9, *, or #."
     try:
-        await ctx.session.room.local_participant.publish_dtmf(digit)
+        await ctx.room.local_participant.publish_dtmf(digit)
         logger.info(f"DTMF sent: {digit}")
         return f"Pressed {digit}. Wait 1-2 seconds then listen for the next prompt."
     except Exception as e:
@@ -151,10 +151,12 @@ async def send_dtmf(ctx: RunContext, digit: str):
     description="Call this the moment you hear a real human (not an automated voice) on the line. This switches you from IVR navigation mode to the claim verification script.",
 )
 async def declare_human_reached(ctx: RunContext):
+    if ctx.session.userdata.get("mode") == "human":
+        return "ok"  # already switched, ignore duplicate call
     ctx.session.userdata["mode"] = "human"
     ctx.session.userdata["ivr_end_time"] = datetime.now().isoformat()
     logger.info("TOOL declare_human_reached: switching to human mode")
-    return "HUMAN_MODE_ACTIVE"
+    return "ok"
 
 
 @function_tool(
@@ -194,6 +196,8 @@ CRITICAL:
 - Do NOT press any digits if a human has already answered.
 - Do NOT speak or introduce yourself while navigating an IVR.
 - Only use send_dtmf when you are certain you are hearing an automated phone menu.
+- Call declare_human_reached() ONCE only — do not call it again if already called.
+- NEVER narrate what you are doing ("I hear a human...", "I will call..."). Just call the tool silently.
 
 CLAIM (for reference only — do NOT share during IVR):
 Patient: {claim_data.get('patient_name', 'N/A')} | Claim#: {claim_data.get('claim_number', 'N/A')}

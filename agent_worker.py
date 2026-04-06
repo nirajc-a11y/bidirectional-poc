@@ -432,7 +432,7 @@ async def entrypoint(ctx: JobContext):
         if role == "assistant":
             # If goodbye already said, suppress any further agent speech immediately
             if goodbye_said:
-                asyncio.create_task(session.interrupt())
+                session.interrupt()  # returns a Future, not a coroutine
                 return
 
             goodbye_phrases = [
@@ -462,7 +462,7 @@ async def entrypoint(ctx: JobContext):
                         ivr_end_time = datetime.fromisoformat(ivr_end_str)
                     except ValueError:
                         pass
-                agent.update_instructions(get_system_prompt(claim_data))
+                asyncio.create_task(agent.update_instructions(get_system_prompt(claim_data)))
                 logger.info(f"[{call_id}] Switched to human mode — claim script active")
 
     @ctx.room.on("sip_dtmf_received")

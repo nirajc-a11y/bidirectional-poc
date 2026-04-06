@@ -415,13 +415,13 @@ async def entrypoint(ctx: JobContext):
                 escape_attempts += 1
                 logger.warning(f"[{call_id}] IVR loop detected (escape attempt {escape_attempts})")
                 if escape_attempts <= config.IVR_MAX_ESCAPE_ATTEMPTS:
-                    asyncio.create_task(session.generate_reply(
+                    session.generate_reply(
                         instructions="You are stuck in a loop — the same prompt repeated. Press 0 now using send_dtmf('0'). If that fails, say 'representative' out loud."
-                    ))
+                    )
                 else:
-                    asyncio.create_task(session.generate_reply(
+                    session.generate_reply(
                         instructions="IVR escape failed after multiple attempts. Call declare_ivr_failed with the reason."
-                    ))
+                    )
             elif normalized:
                 ivr_prompt_history.append(normalized)
                 if len(ivr_prompt_history) > 10:
@@ -502,16 +502,40 @@ async def entrypoint(ctx: JobContext):
             await session.aclose()
 
     session_closed = asyncio.Event()
+    watchdog_task: asyncio.Task | None = None
 
     @session.on("close")
     def on_close(*a):
+        nonlocal watchdog_task, hangup_scheduled
         logger.info("Session closed")
         session_closed.set()
+        if watchdog_task and not watchdog_task.done():
+            watchdog_task.cancel()
         # Failsafe: disconnect SIP participant if auto_hangup was never triggered
         # (e.g., agent said "Thank you" without using end_call tool, or call was dropped)
         if not hangup_scheduled:
             logger.warning("Session closed without scheduled hangup — forcing SIP disconnect")
-            asyncio.create_task(auto_hangup_after_goodbye())
+            hangup_scheduled = True  # Prevent auto_hangup from running separately
+
+            async def _force_disconnect():
+                lk_api = api.LiveKitAPI(
+                    os.getenv("LIVEKIT_URL"),
+                    os.getenv("LIVEKIT_API_KEY"),
+                    os.getenv("LIVEKIT_API_SECRET"),
+                )
+                try:
+                    await lk_api.room.remove_participant(
+                        api.RoomParticipantIdentity(
+                            room=ctx.room.name,
+                            identity="insurance-rep",
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"[{call_id}] Force disconnect failed (may already be gone): {e}")
+                finally:
+                    await lk_api.aclose()
+
+            asyncio.create_task(_force_disconnect())
 
     await session.start(agent=agent, room=ctx.room, record=False)
 
@@ -541,7 +565,7 @@ async def entrypoint(ctx: JobContext):
     except RuntimeError:
         logger.warning("Session closed before greeting could be sent")
 
-    asyncio.create_task(ivr_timeout_watchdog())
+    watchdog_task = asyncio.create_task(ivr_timeout_watchdog())
     await session_closed.wait()
 
     # Save results atomically (write .tmp then rename to prevent partial reads)

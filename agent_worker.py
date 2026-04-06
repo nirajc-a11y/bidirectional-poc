@@ -385,6 +385,7 @@ async def entrypoint(ctx: JobContext):
 
     @session.on("conversation_item_added")
     def on_item(event):
+        nonlocal goodbye_said, escape_attempts, ivr_end_time
         item = event.item
         role = getattr(item, "role", "unknown")
         content = ""
@@ -411,7 +412,6 @@ async def entrypoint(ctx: JobContext):
         if role != "assistant" and session.userdata.get("mode", "ivr") == "ivr":
             normalized = re.sub(r"[^\w\s]", "", content.lower()).strip()
             if normalized and normalized in ivr_prompt_history[-3:]:
-                nonlocal escape_attempts
                 escape_attempts += 1
                 logger.warning(f"[{call_id}] IVR loop detected (escape attempt {escape_attempts})")
                 if escape_attempts <= config.IVR_MAX_ESCAPE_ATTEMPTS:
@@ -448,7 +448,6 @@ async def entrypoint(ctx: JobContext):
                 or bool(session.userdata.get("claim_results"))
             )
             if is_concluding and any(p in content.lower() for p in goodbye_phrases):
-                nonlocal goodbye_said
                 if not goodbye_said:
                     goodbye_said = True
                     asyncio.create_task(auto_hangup_after_goodbye())
@@ -459,7 +458,6 @@ async def entrypoint(ctx: JobContext):
                 session.userdata["human_mode_initialized"] = True
                 ivr_end_str = session.userdata.get("ivr_end_time")
                 if ivr_end_str:
-                    nonlocal ivr_end_time
                     try:
                         ivr_end_time = datetime.fromisoformat(ivr_end_str)
                     except ValueError:

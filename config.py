@@ -1,5 +1,6 @@
 import logging
 import os
+import secrets
 import sys
 
 from dotenv import load_dotenv
@@ -56,8 +57,22 @@ MAX_CSV_SIZE_MB = int(os.getenv("MAX_CSV_SIZE_MB", "10"))
 MIN_CALL_WAIT = int(os.getenv("MIN_CALL_WAIT", "30"))
 
 # --- Rate limiting ---
-LOGIN_MAX_ATTEMPTS = 5
+LOGIN_MAX_ATTEMPTS = 3
 LOGIN_WINDOW_SECONDS = 300
+
+# --- Session ---
+SESSION_SECRET = os.getenv("SESSION_SECRET", secrets.token_hex(32))
+
+# --- Logging ---
+LOG_FORMAT = os.getenv("LOG_FORMAT", "text")  # "text" or "json"
+
+# --- IVR ---
+IVR_TIMEOUT_SECONDS = int(os.getenv("IVR_TIMEOUT_SECONDS", "90"))
+IVR_MAX_ESCAPE_ATTEMPTS = int(os.getenv("IVR_MAX_ESCAPE_ATTEMPTS", "2"))
+
+# --- SIP Retries ---
+SIP_MAX_RETRIES = int(os.getenv("SIP_MAX_RETRIES", "3"))
+SIP_RETRY_DELAYS = [5, 15, 30]  # seconds between retry attempts
 
 # --- Startup validation ---
 _REQUIRED = {

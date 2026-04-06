@@ -466,6 +466,37 @@ async def make_sip_call(claim_data: dict, room_name: str) -> bool:
         await lk_api.aclose()
 
 
+async def _make_sip_call_with_retry(claim_data: dict, room_name: str, call_id: str) -> bool:
+    """Retry make_sip_call up to SIP_MAX_RETRIES times with backoff."""
+    claim_number = claim_data.get("claim_number", "unknown")
+    phone = claim_data.get("insurance_phone", "")
+
+    # Non-retryable: validate before any attempt
+    if not phone:
+        logger.error(f"[{call_id}] No phone number for claim {claim_number}")
+        return False
+    if not validate_phone(phone):
+        logger.error(f"[{call_id}] Invalid phone format for claim {claim_number}")
+        return False
+
+    delays = config.SIP_RETRY_DELAYS
+    for attempt in range(1, config.SIP_MAX_RETRIES + 1):
+        success = await make_sip_call(claim_data, room_name)
+        if success:
+            if attempt > 1:
+                logger.info(f"[{call_id}] SIP call succeeded on attempt {attempt}")
+            return True
+        if attempt < config.SIP_MAX_RETRIES:
+            delay = delays[attempt - 1] if attempt - 1 < len(delays) else delays[-1]
+            logger.warning(f"[{call_id}] SIP attempt {attempt}/{config.SIP_MAX_RETRIES} failed, retrying in {delay}s")
+            call_mgr.set_call_status(claim_number, "retrying")
+            await broadcast({"type": "call_retrying", "claim_number": claim_number, "attempt": attempt})
+            await asyncio.sleep(delay)
+        else:
+            logger.error(f"[{call_id}] All {config.SIP_MAX_RETRIES} SIP attempts failed for {claim_number}")
+    return False
+
+
 def _read_results_file(results_path: str):
     """Read and remove a results JSON file. Returns None if missing or corrupt."""
     if not os.path.exists(results_path):
@@ -518,15 +549,21 @@ async def wait_for_call_completion(claim_number: str, room_name: str):
 
 
 async def process_single_call(claim_data: dict):
+    call_id = uuid4().hex[:8]
     claim_number = str(claim_data.get("claim_number", "unknown"))
     safe_claim = sanitize_claim_number(claim_number)
     if not safe_claim:
-        logger.error(f"Invalid claim number format: {claim_number}")
+        logger.error(f"[{call_id}] Invalid claim number format: {claim_number}")
         return
+
+    # Inject call_id into claim_data so agent can log with it
+    claim_data = {**claim_data, "call_id": call_id}
 
     # Unique room name to avoid collisions
     room_name = f"call-{safe_claim}-{uuid4().hex[:6]}"
+    call_start = time.time()
 
+    logger.info(f"[{call_id}] Starting call for claim {claim_number}")
     await broadcast({
         "type": "call_started",
         "claim_number": claim_number,
@@ -541,10 +578,10 @@ async def process_single_call(claim_data: dict):
     except FileNotFoundError:
         pass
 
-    success = await make_sip_call(claim_data, room_name)
+    success = await _make_sip_call_with_retry(claim_data, room_name, call_id)
     if not success:
         call_mgr.set_call_status(claim_number, "failed")
-        await broadcast({"type": "call_failed", "claim_number": claim_number, "reason": "SIP call failed"})
+        await broadcast({"type": "call_failed", "claim_number": claim_number, "reason": "SIP call failed after retries"})
         return
 
     relay_task = asyncio.create_task(relay_transcripts(room_name, claim_number))
@@ -552,6 +589,14 @@ async def process_single_call(claim_data: dict):
     result = await wait_for_call_completion(safe_claim, room_name)
 
     relay_task.cancel()
+    try:
+        await relay_task
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning(f"[{call_id}] Relay task error: {e}", exc_info=True)
+
+    total_duration = time.time() - call_start
 
     if result:
         transcript_text = result.get("transcript", "")
@@ -562,6 +607,14 @@ async def process_single_call(claim_data: dict):
         call_results["call_status"] = "completed"
         call_mgr.update_row(claim_number, call_results)
 
+        ivr_duration = result.get("ivr_duration", 0)
+        human_duration = result.get("human_duration", 0)
+        logger.info(
+            f"[{call_id}] Call {claim_number} complete: "
+            f"total={total_duration:.1f}s ivr={ivr_duration:.1f}s human={human_duration:.1f}s "
+            f"result={call_results.get('claim_result', 'unknown')}"
+        )
+
         await broadcast({
             "type": "call_completed",
             "claim_number": claim_number,
@@ -570,6 +623,7 @@ async def process_single_call(claim_data: dict):
         })
     else:
         call_mgr.set_call_status(claim_number, "no-answer")
+        logger.warning(f"[{call_id}] Call {claim_number} no-answer after {total_duration:.1f}s")
         await broadcast({"type": "call_no_answer", "claim_number": claim_number, "stats": call_mgr.get_stats()})
 
     # Room cleanup
@@ -577,7 +631,7 @@ async def process_single_call(claim_data: dict):
     try:
         await lk_api.room.delete_room(api.DeleteRoomRequest(room=room_name))
     except Exception as e:
-        logger.warning(f"Room cleanup failed for {room_name}: {e}")
+        logger.warning(f"[{call_id}] Room cleanup failed for {room_name}: {e}")
     finally:
         await lk_api.aclose()
 

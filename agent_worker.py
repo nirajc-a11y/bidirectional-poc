@@ -343,6 +343,9 @@ async def entrypoint(ctx: JobContext):
             return  # Prevent duplicate hangup tasks
         hangup_scheduled = True
 
+        # Cancel any queued speech after goodbye — we're done talking
+        session.interrupt()
+
         # Wait for all pending TTS speech to finish playing
         try:
             await session.drain()
@@ -555,7 +558,17 @@ async def entrypoint(ctx: JobContext):
         track_count = len(participant.track_publications)
         logger.info(f"SIP participant tracks: audio={track_count}")
         if track_count == 0:
-            logger.warning("SIP participant has no audio tracks — call may have no audio")
+            logger.warning("SIP participant has no audio tracks — waiting up to 3s for audio to arrive")
+            # SIP audio tracks often arrive slightly after the participant joins
+            deadline = asyncio.get_event_loop().time() + 3.0
+            while asyncio.get_event_loop().time() < deadline:
+                await asyncio.sleep(0.25)
+                track_count = len(participant.track_publications)
+                if track_count > 0:
+                    logger.info(f"SIP audio track arrived after short delay")
+                    break
+            else:
+                logger.warning("SIP participant still has no audio tracks after 3s — call may have no audio")
 
         # Focus agent input on the SIP participant's audio
         session.room_io.set_participant(participant.identity)

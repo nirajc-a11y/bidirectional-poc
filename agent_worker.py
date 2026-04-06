@@ -120,7 +120,69 @@ async def end_call(ctx: RunContext, reason: str = ""):
     return "Call ending. Say a brief goodbye."
 
 
+@function_tool(
+    name="send_dtmf",
+    description="Press a phone keypad digit (DTMF tone). Use to navigate IVR menus. digit must be 0-9, *, or #.",
+)
+async def send_dtmf(ctx: RunContext, digit: str):
+    if digit not in "0123456789*#":
+        return f"Invalid digit '{digit}'. Must be 0-9, *, or #."
+    try:
+        await ctx.room.local_participant.publish_dtmf(digit)
+        logger.info(f"DTMF sent: {digit}")
+        return f"Pressed {digit}. Wait 1-2 seconds then listen for the next prompt."
+    except Exception as e:
+        logger.error(f"DTMF send failed: {e}")
+        return f"Failed to press {digit}: {e}"
+
+
+@function_tool(
+    name="declare_human_reached",
+    description="Call this the moment you hear a real human (not an automated voice) on the line. This switches you from IVR navigation mode to the claim verification script.",
+)
+async def declare_human_reached(ctx: RunContext):
+    ctx.session.userdata["mode"] = "human"
+    ctx.session.userdata["ivr_end_time"] = datetime.now().isoformat()
+    logger.info("TOOL declare_human_reached: switching to human mode")
+    return "HUMAN_MODE_ACTIVE. Now follow the claim verification script. Greet the rep."
+
+
+@function_tool(
+    name="declare_ivr_failed",
+    description="Call this when you cannot navigate the IVR — stuck in a loop, unrecognized system, or cannot reach claims after multiple attempts.",
+)
+async def declare_ivr_failed(ctx: RunContext, reason: str):
+    ctx.session.userdata["claim_results"] = {"claim_result": "ivr-failed", "notes": reason}
+    ctx.session.userdata["call_ended"] = True
+    logger.info(f"TOOL declare_ivr_failed: {reason}")
+    return "IVR navigation failed. Say a brief goodbye and end the call."
+
+
 # --- Prompt ---
+
+def get_ivr_prompt(claim_data: dict) -> str:
+    name = os.getenv("AGENT_NAME", "Sarah")
+    org = os.getenv("PROVIDER_NAME", "ABC Medical Group")
+    return f"""You are {name} from {org} calling to verify a medical insurance claim.
+
+You have just dialed an insurance company and are currently navigating their automated phone system (IVR).
+
+YOUR ONLY GOAL RIGHT NOW: reach a live human agent in the claims department.
+
+RULES:
+- Listen to each automated prompt fully before acting.
+- Use send_dtmf to press a digit when a menu offers options. Pick the option most likely to reach "claims", "claim status", "billing", or "insurance verification".
+- If no option clearly matches, press 0 or use send_dtmf("0") to reach an operator.
+- If the IVR asks you to speak (voice-activated), say "claims department" or "representative" out loud.
+- The moment you hear a real human voice (natural speech, not robotic), immediately call declare_human_reached().
+- If you get stuck in a loop (same prompt twice) or cannot proceed after 2 escape attempts, call declare_ivr_failed("reason").
+- Never repeat a digit sequence you've already tried.
+- Do NOT introduce yourself or mention the claim while in IVR mode.
+
+CLAIM (for reference only — do NOT share during IVR):
+Patient: {claim_data.get('patient_name', 'N/A')} | Claim#: {claim_data.get('claim_number', 'N/A')}
+"""
+
 
 def get_system_prompt(claim_data: dict) -> str:
     name = os.getenv("AGENT_NAME", "Sarah")
@@ -233,12 +295,12 @@ async def entrypoint(ctx: JobContext):
     )
 
     agent = Agent(
-        instructions=get_system_prompt(claim_data),
+        instructions=get_ivr_prompt(claim_data),
         stt=deepgram.STT(model="nova-3", language="en", no_delay=True, smart_format=True, punctuate=True),
         llm=llm,
         tts=get_tts(),
         vad=silero.VAD.load(),
-        tools=[save_claim_status, confirm_details, mark_unable_to_verify, end_call],
+        tools=[send_dtmf, declare_human_reached, declare_ivr_failed, save_claim_status, confirm_details, mark_unable_to_verify, end_call],
         turn_handling=TurnHandlingOptions(
             turn_detection="vad",
             endpointing=EndpointingOptions(
@@ -262,6 +324,8 @@ async def entrypoint(ctx: JobContext):
     hangup_scheduled = False
     goodbye_said = False
     drop_handled = False
+    ivr_prompt_history: list[str] = []
+    escape_attempts = 0
 
     # Auto-hangup: disconnect SIP participant after goodbye
     async def auto_hangup_after_goodbye():

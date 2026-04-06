@@ -524,7 +524,7 @@ async def entrypoint(ctx: JobContext):
 
         # Let the AI generate its greeting
         session.generate_reply(
-            instructions="Someone just picked up the phone. Greet them naturally and ask if you've reached the claims department."
+            instructions="The call just connected. Listen carefully. If you hear an automated IVR system, begin navigating it using send_dtmf. If a human immediately answers, call declare_human_reached() then greet them."
         )
     except asyncio.TimeoutError:
         logger.error("SIP participant did not connect within 60s — call likely not answered")

@@ -61,7 +61,16 @@ LOGIN_MAX_ATTEMPTS = 3
 LOGIN_WINDOW_SECONDS = 300
 
 # --- Session ---
-SESSION_SECRET = os.getenv("SESSION_SECRET", secrets.token_hex(32))
+# WARNING: if SESSION_SECRET is not set, a random secret is generated on each
+# startup — any existing browser sessions will be invalidated on every restart.
+# Set SESSION_SECRET to a stable random value in production (e.g. `openssl rand -hex 32`).
+_session_secret_from_env = os.getenv("SESSION_SECRET", "")
+if not _session_secret_from_env and os.getenv("DASHBOARD_PASSWORD"):
+    logger.warning(
+        "SESSION_SECRET is not set but DASHBOARD_PASSWORD is — sessions will be "
+        "invalidated on every restart. Set SESSION_SECRET in your environment."
+    )
+SESSION_SECRET = _session_secret_from_env or secrets.token_hex(32)
 
 # --- Logging ---
 LOG_FORMAT = os.getenv("LOG_FORMAT", "text")  # "text" or "json"

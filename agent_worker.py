@@ -417,8 +417,11 @@ async def entrypoint(ctx: JobContext):
                 content = item.content
             else:
                 # content is list[str | ImageContent | AudioContent | Instructions]
-                # Only extract plain string parts to avoid repr noise like "[][]"
-                content = " ".join(c for c in item.content if isinstance(c, str))
+                # Only extract non-empty string parts; skip repr noise like "[]", "{}"
+                content = " ".join(
+                    c for c in item.content
+                    if isinstance(c, str) and c.strip() and c.strip() not in ("[]", "{}")
+                )
         if not content.strip():
             return
         speaker = "Agent" if role == "assistant" else "Human"

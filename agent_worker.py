@@ -130,7 +130,7 @@ async def send_dtmf(ctx: RunContext, digit: str):
     if digit not in "0123456789*#":
         return f"Invalid digit '{digit}'. Must be 0-9, *, or #."
     try:
-        await ctx.room.local_participant.publish_dtmf(digit)
+        await ctx.session.room.local_participant.publish_dtmf(digit)
         logger.info(f"DTMF sent: {digit}")
         return f"Pressed {digit}. Wait 1-2 seconds then listen for the next prompt."
     except Exception as e:
@@ -167,19 +167,25 @@ def get_ivr_prompt(claim_data: dict) -> str:
     org = os.getenv("PROVIDER_NAME", "ABC Medical Group")
     return f"""You are {name} from {org} calling to verify a medical insurance claim.
 
-You have just dialed an insurance company and are currently navigating their automated phone system (IVR).
+You just dialed an insurance company. The call has connected. Wait and listen.
 
-YOUR ONLY GOAL RIGHT NOW: reach a live human agent in the claims department.
+STEP 1 — IDENTIFY WHAT YOU HEAR:
+- If you hear a HUMAN voice answering (natural speech like "Claims department, how can I help?"), call declare_human_reached() IMMEDIATELY. Do NOT press any digits first.
+- If you hear an AUTOMATED voice reading menu options (robotic, listing "press 1 for...", "press 2 for..."), you are in an IVR. Navigate it using send_dtmf.
+- If you hear silence or ringing, wait up to 5 seconds before acting.
 
-RULES:
-- Listen to each automated prompt fully before acting.
-- Use send_dtmf to press a digit when a menu offers options. Pick the option most likely to reach "claims", "claim status", "billing", or "insurance verification".
-- If no option clearly matches, press 0 or use send_dtmf("0") to reach an operator.
-- If the IVR asks you to speak (voice-activated), say "claims department" or "representative" out loud.
-- The moment you hear a real human voice (natural speech, not robotic), immediately call declare_human_reached().
-- If you get stuck in a loop (same prompt twice) or cannot proceed after 2 escape attempts, call declare_ivr_failed("reason").
-- Never repeat a digit sequence you've already tried.
-- Do NOT introduce yourself or mention the claim while in IVR mode.
+NAVIGATING AN IVR (only if you hear automated prompts):
+- Listen to each prompt fully before pressing anything.
+- Press the digit most likely to reach "claims", "claim status", "billing", or "insurance verification".
+- If no option matches, press 0 to reach an operator.
+- The moment the automated voice stops and a HUMAN answers, call declare_human_reached().
+- If the same automated prompt repeats twice, you are stuck — call declare_ivr_failed("stuck in loop").
+- Never press a digit you have already tried.
+
+CRITICAL:
+- Do NOT press any digits if a human has already answered.
+- Do NOT speak or introduce yourself while navigating an IVR.
+- Only use send_dtmf when you are certain you are hearing an automated phone menu.
 
 CLAIM (for reference only — do NOT share during IVR):
 Patient: {claim_data.get('patient_name', 'N/A')} | Claim#: {claim_data.get('claim_number', 'N/A')}
@@ -524,7 +530,7 @@ async def entrypoint(ctx: JobContext):
 
         # Let the AI generate its greeting
         session.generate_reply(
-            instructions="The call just connected. Listen carefully. If you hear an automated IVR system, begin navigating it using send_dtmf. If a human immediately answers, call declare_human_reached() then greet them."
+            instructions="The call just connected. Wait and listen to what you hear. Do NOT press any digits yet. If you hear a human voice answering, call declare_human_reached() immediately. If you hear an automated menu, use send_dtmf to navigate it."
         )
     except asyncio.TimeoutError:
         logger.error("SIP participant did not connect within 60s — call likely not answered")

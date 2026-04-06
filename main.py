@@ -28,6 +28,8 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("outbound-caller")
+from logging_utils import get_audit_logger
+audit_log = get_audit_logger()
 
 # Suppress noisy LiveKit SDK stream messages ("ignoring byte/text stream")
 logging.getLogger("root").setLevel(logging.WARNING)
@@ -52,8 +54,8 @@ is_paused = False
 is_stopped = False
 start_time = time.time()
 
-# Session secret (regenerated on restart — fine for a demo)
-SESSION_SECRET = secrets.token_hex(32)
+# Session secret — set SESSION_SECRET env var in prod for stable sessions across restarts
+SESSION_SECRET = config.SESSION_SECRET
 
 # --- Validation helpers ---
 
@@ -186,20 +188,26 @@ async def login(request: Request):
 
     if not _check_rate_limit(ip):
         logger.warning(f"Login rate-limited: {ip}")
-        return JSONResponse(status_code=429, content={"error": "Too many login attempts. Try again later."})
+        audit_log.info(f"LOGIN_RATE_LIMITED ip={ip}")
+        response = JSONResponse(status_code=429, content={"error": "Too many login attempts. Try again later."})
+        response.headers["Retry-After"] = str(config.LOGIN_WINDOW_SECONDS)
+        return response
 
     form = await request.form()
     password = form.get("password", "")
 
     if password == config.DASHBOARD_PASSWORD:
         logger.info(f"Login success: {ip}")
+        audit_log.info(f"LOGIN_SUCCESS ip={ip}")
         response = RedirectResponse("/", status_code=303)
         is_https = os.getenv("RAILWAY_ENVIRONMENT") is not None
         response.set_cookie("session", make_session_token(), httponly=True, samesite="lax", secure=is_https)
         return response
 
     _record_login_attempt(ip)
+    attempts_so_far = len(_login_attempts.get(ip, []))
     logger.warning(f"Login failed: {ip}")
+    audit_log.info(f"LOGIN_FAILURE ip={ip} attempt={attempts_so_far}/{config.LOGIN_MAX_ATTEMPTS}")
     return FileResponse("static/login.html", status_code=401)
 
 
@@ -353,7 +361,7 @@ async def stop_calls():
 
 
 @app.get("/api/transcript/{claim_number}")
-async def get_transcript(claim_number: str):
+async def get_transcript(claim_number: str, request: Request):
     safe = sanitize_claim_number(claim_number)
     if not safe:
         return JSONResponse(status_code=400, content={"error": "Invalid claim number"})
@@ -365,14 +373,16 @@ async def get_transcript(claim_number: str):
         return JSONResponse(status_code=400, content={"error": "Invalid claim number"})
 
     if os.path.exists(filepath):
+        audit_log.info(f"TRANSCRIPT_ACCESS claim={claim_number} ip={request.client.host if request.client else 'unknown'}")
         with open(filepath, "r", encoding="utf-8") as f:
             return {"claim_number": claim_number, "transcript": f.read()}
     return JSONResponse(status_code=404, content={"error": "Transcript not found"})
 
 
 @app.get("/api/download-csv")
-async def download_csv():
+async def download_csv(request: Request):
     if os.path.exists(config.CSV_PATH):
+        audit_log.info(f"CSV_DOWNLOAD ip={request.client.host if request.client else 'unknown'}")
         return FileResponse(config.CSV_PATH, media_type="text/csv", filename="claims_updated.csv")
     return JSONResponse(status_code=404, content={"error": "No CSV loaded"})
 

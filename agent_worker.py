@@ -598,11 +598,8 @@ async def entrypoint(ctx: JobContext):
 
         # Focus agent input on the SIP participant's audio
         session.room_io.set_participant(participant.identity)
-
-        # Let the AI generate its greeting
-        session.generate_reply(
-            instructions="The call just connected. Wait and listen to what you hear. Do NOT press any digits yet. If you hear a human voice answering, call declare_human_reached() immediately. If you hear an automated menu, use send_dtmf to navigate it."
-        )
+        # Do NOT call generate_reply here — let the IVR/human speak first.
+        # The VAD/STT pipeline will trigger the agent naturally when audio arrives.
     except asyncio.TimeoutError:
         logger.error("SIP participant did not connect within 60s — call likely not answered")
         await session.aclose()

@@ -214,9 +214,12 @@ async def entrypoint(ctx: JobContext):
             logger.warning(f"Invalid room metadata JSON in {ctx.room.name}")
 
     claim_number = claim_data.get("claim_number", "unknown")
+    call_id = claim_data.get("call_id", "--------")
+    call_start = datetime.now()
+    ivr_end_time: datetime | None = None
     if not claim_data.get("claim_number") or not claim_data.get("patient_name"):
-        logger.warning(f"Missing required claim fields (claim_number, patient_name) in room {ctx.room.name}")
-    logger.info(f"Claim: {claim_number}")
+        logger.warning(f"[{call_id}] Missing required claim fields (claim_number, patient_name) in room {ctx.room.name}")
+    logger.info(f"[{call_id}] Claim: {claim_number}")
     transcript = CallTranscript()
 
     # Groq — fastest model with tool calling
@@ -258,6 +261,7 @@ async def entrypoint(ctx: JobContext):
     )
     hangup_scheduled = False
     goodbye_said = False
+    drop_handled = False
 
     # Auto-hangup: disconnect SIP participant after goodbye
     async def auto_hangup_after_goodbye():
@@ -295,6 +299,18 @@ async def entrypoint(ctx: JobContext):
         # Then close the agent session
         await session.aclose()
 
+    async def handle_dropped_call():
+        nonlocal drop_handled
+        if drop_handled:
+            return
+        drop_handled = True
+        logger.warning(f"[{call_id}] SIP participant dropped — saving partial results")
+        partial = session.userdata.get("claim_results", {})
+        partial["claim_result"] = partial.get("claim_result", "dropped")
+        partial["notes"] = partial.get("notes", "") + " | call dropped mid-conversation"
+        session.userdata["claim_results"] = partial
+        await session.aclose()
+
     @session.on("conversation_item_added")
     def on_item(event):
         item = event.item
@@ -317,7 +333,7 @@ async def entrypoint(ctx: JobContext):
                 )
             )
         except Exception as e:
-            logger.debug(f"Failed to publish transcript data: {e}")
+            logger.warning(f"[{call_id}] Failed to publish transcript data: {e}")
 
         # Auto-hangup when agent says a closing phrase.
         # Trigger if: call was confirmed, ended via tool, OR any results were saved (covers denied/unknown outcomes).
@@ -352,6 +368,12 @@ async def entrypoint(ctx: JobContext):
         if changed.get("sip.dtmf") == "1":
             session.userdata["confirmed"] = True
             transcript.add_entry("System", "DTMF 1 received")
+
+    @ctx.room.on("participant_disconnected")
+    def on_participant_disconnected(participant):
+        if participant.identity == "insurance-rep" and not hangup_scheduled and not drop_handled:
+            logger.warning(f"[{call_id}] SIP participant disconnected unexpectedly")
+            asyncio.create_task(handle_dropped_call())
 
     session_closed = asyncio.Event()
 
@@ -395,15 +417,33 @@ async def entrypoint(ctx: JobContext):
 
     await session_closed.wait()
 
-    # Save results
+    # Save results atomically (write .tmp then rename to prevent partial reads)
     results = session.userdata.get("claim_results", {})
     results["confirmed"] = str(session.userdata.get("confirmed", False)).lower()
-    final = {"claim_number": claim_number, "transcript": transcript.get_full_transcript(), "results": results}
-    logger.info(f"Done {claim_number}: {json.dumps(results)}")
+
+    # Duration metrics
+    call_end = datetime.now()
+    total_seconds = (call_end - call_start).total_seconds()
+    ivr_seconds = (ivr_end_time - call_start).total_seconds() if ivr_end_time else 0
+    human_seconds = (call_end - ivr_end_time).total_seconds() if ivr_end_time else total_seconds
+
+    final = {
+        "claim_number": claim_number,
+        "call_id": call_id,
+        "transcript": transcript.get_full_transcript(),
+        "results": results,
+        "ivr_duration": round(ivr_seconds, 1),
+        "human_duration": round(human_seconds, 1),
+        "total_duration": round(total_seconds, 1),
+    }
+    logger.info(f"[{call_id}] Done {claim_number}: {json.dumps(results)}")
 
     os.makedirs("call_results", exist_ok=True)
     safe_name = claim_number if _SAFE_FILENAME_RE.match(claim_number) else "unknown"
-    with open(f"call_results/{safe_name}.json", "w") as f:
+    tmp_path = f"call_results/{safe_name}.tmp.json"
+    final_path = f"call_results/{safe_name}.json"
+    with open(tmp_path, "w") as f:
         json.dump(final, f, indent=2)
+    os.replace(tmp_path, final_path)
 
 

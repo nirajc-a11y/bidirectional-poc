@@ -135,10 +135,10 @@ IDENTITY (NEVER BREAK):
 - If the other person asks to end the call, says "hang up", or wants to stop, use the end_call tool immediately.
 
 HANDLING INTERRUPTIONS (CRITICAL):
-- If you are mid-sentence and hear background noise, a one-word response, or partial speech, DO NOT restart your sentence from the beginning.
-- If interrupted with a short response like "okay" or "one moment", just continue from where you left off.
-- Only say "Sorry, go ahead?" if it seems like they genuinely want to ask you something (more than 3 words, a clear question).
+- If interrupted with "No", "Wait", or any correction, STOP immediately and address it — do not resume what you were saying.
+- If interrupted mid-sentence with a neutral filler ("okay", "one moment", "uh-huh"), acknowledge briefly ("Got it.") then continue from where you left off.
 - NEVER repeat your full intro message ("I'm calling to check on a claim for...") more than once. If you've already stated the patient name and claim number, do not repeat the entire phrase — just answer the rep's question directly.
+- Only say "Sorry, go ahead?" if they say more than 3 words that sound like a question.
 
 VOICE & TONE:
 - Speak naturally, use contractions (I'm, we've, that's).
@@ -173,9 +173,11 @@ CALL FLOW:
 5. Once you have the relevant info, IMMEDIATELY call save_claim_status with all collected fields.
 6. Then summarize what you've got: "So just to confirm — [status], [key detail], [key detail]. Does that all sound right?"
 7. If they correct anything → update via save_claim_status → re-summarize.
-8. After they confirm → call confirm_details → "Thank you so much for your help. Have a great day!"
-9. If they cannot locate the claim, transferred incorrectly, or cannot help → call mark_unable_to_verify → "No problem, thanks anyway. Have a good one!"
-10. If they ask to hang up, end the call, or say goodbye → call end_call → "No problem, thanks for your time. Goodbye!"
+8. After they confirm → call confirm_details → say ONLY: "Thank you so much for your help. Have a great day!"
+9. If they cannot locate the claim, transferred incorrectly, or cannot help → call mark_unable_to_verify → say ONLY: "No problem, thanks anyway. Have a good one!"
+10. If they ask to hang up, end the call, or say goodbye → call end_call → say ONLY: "No problem, thanks for your time. Goodbye!"
+
+NEVER say a goodbye phrase more than once. After saying goodbye, stop — do not speak again.
 
 IMPORTANT — YOU MUST ALWAYS CALL A TOOL BEFORE ENDING THE CALL:
 - If you collected ANY information about the claim → call save_claim_status.
@@ -242,9 +244,9 @@ async def entrypoint(ctx: JobContext):
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="vad",
-                min_duration=0.8,   # Short enough to catch 2-word questions like "Claim for?"
-                min_words=2,        # 2+ words = real interruption (handles "Claim for", "Can you repeat")
-                resume_false_interruption=True,  # Single-word noise ("One", "Okay") resumes instead of restarting
+                min_duration=0.5,   # Reduced to catch short single-syllable words like "No", "Yes"
+                min_words=1,        # Single words ("No", "Yes", "Rejected") are real interruptions
+                resume_false_interruption=True,  # Sub-word noise (no transcript) still resumes agent
             ),
         ),
         allow_interruptions=True,
@@ -254,6 +256,7 @@ async def entrypoint(ctx: JobContext):
         userdata={"claim_results": {}, "confirmed": False},
     )
     hangup_scheduled = False
+    goodbye_said = False
 
     # Auto-hangup: disconnect SIP participant after goodbye
     async def auto_hangup_after_goodbye():
@@ -331,7 +334,10 @@ async def entrypoint(ctx: JobContext):
                 or bool(session.userdata.get("claim_results"))
             )
             if is_concluding and any(p in content.lower() for p in goodbye_phrases):
-                asyncio.create_task(auto_hangup_after_goodbye())
+                nonlocal goodbye_said
+                if not goodbye_said:
+                    goodbye_said = True
+                    asyncio.create_task(auto_hangup_after_goodbye())
 
     @ctx.room.on("sip_dtmf_received")
     def on_dtmf(event):

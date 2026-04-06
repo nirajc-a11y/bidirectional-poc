@@ -57,7 +57,14 @@ def get_tts():
         )
         logger.info("TTS: ElevenLabs")
         return tts
-    tts = deepgram.TTS(model=os.getenv("TTS_VOICE", "aura-2-athena-en"))
+    # Recommended voices (all aura-2):
+    #   asteria-en — warm, natural, best for phone calls (default)
+    #   luna-en    — friendly, softer tone
+    #   pandora-en — British English, clear articulation
+    #   thalia-en  — conversational, younger cadence
+    tts = deepgram.TTS(
+        model=os.getenv("TTS_VOICE", "aura-2-asteria-en"),
+    )
     logger.info("TTS: Deepgram")
     return tts
 
@@ -147,7 +154,7 @@ async def declare_human_reached(ctx: RunContext):
     ctx.session.userdata["mode"] = "human"
     ctx.session.userdata["ivr_end_time"] = datetime.now().isoformat()
     logger.info("TOOL declare_human_reached: switching to human mode")
-    return "HUMAN_MODE_ACTIVE. Now follow the claim verification script. Greet the rep."
+    return "HUMAN_MODE_ACTIVE"
 
 
 @function_tool(
@@ -205,11 +212,23 @@ VOICE RULES (strict):
 - No filler openers like "Of course!" or "Certainly!". "Got it." or "Sure." only when natural.
 - Use contractions. Keep it conversational.
 - NEVER repeat what you've already said.
+- Avoid starting sentences with "I". Lead with the action or question instead.
+- No back-to-back questions. Ask one, wait for a full answer, then ask the next.
+- If they give a partial answer (e.g. "it's denied"), follow up tightly: "Got it — and the denial reason?" not a full re-question.
 
 INTERRUPTIONS:
 - If they say "No", "Wait", or correct you — stop immediately, address the correction only.
 - If they say "okay" or "one moment" after your question — they haven't answered, wait silently or ask once: "Sorry — what was that?"
 - If they interrupt mid-sentence — drop whatever you were saying, respond to what they said.
+
+FILLER WORDS:
+- "um", "uh", "so", "let me", "one moment", "hold on", "let me check" = the rep is still formulating. Wait silently.
+- Only re-ask after 8 full seconds of silence following a filler word.
+
+SILENCE HANDLING:
+- 3 seconds of silence after your question → ask once: "Sorry, are you still there?"
+- 6 seconds total → say: "I can hear some background — just want to make sure you can hear me."
+- 10 seconds total → say: "Having trouble hearing you — I'll try calling back." then call end_call.
 
 DATA RULES:
 - NEVER guess or assume. Only use what the rep says.
@@ -224,7 +243,7 @@ CPT: {claim_data.get('procedure_code', 'N/A')} | Billed: ${claim_data.get('bille
 Provider: {claim_data.get('provider_name', 'N/A')} | NPI: {claim_data.get('npi', 'N/A')}
 
 FLOW — follow this order, one question at a time:
-1. "Hi, this is {name} from {org}. Is this the claims department?"
+1. Say EXACTLY: "Hi, this is {name} from {org}. Is this the claims department?" — nothing more.
 2. "I'm calling about a claim for {claim_data.get('patient_name', 'N/A')}, claim {claim_data.get('claim_number', 'N/A')}. Can you pull that up?"
 3. "What's the status on that?"
 4. Collect based on status — ask ONE field at a time, say "Got it." between each:
@@ -289,7 +308,16 @@ async def entrypoint(ctx: JobContext):
 
     agent = Agent(
         instructions=get_ivr_prompt(claim_data),
-        stt=deepgram.STT(model="nova-3", language="en", no_delay=True, smart_format=True, punctuate=True),
+        stt=deepgram.STT(
+            model=os.getenv("STT_MODEL", "nova-3"),  # set STT_MODEL=flux to enable Flux (semantic turn detection)
+            language="en",
+            no_delay=True,
+            smart_format=True,
+            punctuate=True,
+            keyterm=["claim number", "member ID", "date of service", "CPT code",
+                     "approved", "denied", "pending", "appeal deadline",
+                     "reference number", "explanation of benefits"],
+        ),
         llm=llm,
         tts=get_tts(),
         vad=silero.VAD.load(),
@@ -297,15 +325,15 @@ async def entrypoint(ctx: JobContext):
         turn_handling=TurnHandlingOptions(
             turn_detection="vad",
             endpointing=EndpointingOptions(
-                min_delay=0.5,
-                max_delay=1.5,
+                min_delay=0.3,   # faster pickup when rep finishes speaking
+                max_delay=1.5,   # insurance reps often pause mid-sentence — give them room
             ),
             interruption=InterruptionOptions(
                 enabled=True,
-                mode="vad",
-                min_duration=0.5,   # Reduced to catch short single-syllable words like "No", "Yes"
-                min_words=1,        # Single words ("No", "Yes", "Rejected") are real interruptions
-                resume_false_interruption=True,  # Sub-word noise (no transcript) still resumes agent
+                mode="adaptive",             # won't fire on filler words ("um", "uh", "hold on")
+                min_duration=0.4,
+                min_words=1,
+                resume_false_interruption=True,
             ),
         ),
         allow_interruptions=True,
@@ -456,6 +484,9 @@ async def entrypoint(ctx: JobContext):
                     except ValueError:
                         pass
                 asyncio.create_task(agent.update_instructions(get_system_prompt(claim_data)))
+                session.generate_reply(
+                    instructions=f'A human just answered. Say EXACTLY: "Hi, this is {os.getenv("AGENT_NAME", "Sarah")} from {os.getenv("PROVIDER_NAME", "ABC Medical Group")}. Is this the claims department?" — nothing else.'
+                )
                 logger.info(f"[{call_id}] Switched to human mode — claim script active")
 
     @ctx.room.on("sip_dtmf_received")

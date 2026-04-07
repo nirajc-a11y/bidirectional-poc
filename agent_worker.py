@@ -537,14 +537,17 @@ async def entrypoint(ctx: JobContext):
 
     session_closed = asyncio.Event()
     watchdog_task: asyncio.Task | None = None
+    silence_watchdog_task: asyncio.Task | None = None
 
     @session.on("close")
     def on_close(*a):
-        nonlocal watchdog_task, hangup_scheduled
+        nonlocal watchdog_task, silence_watchdog_task, hangup_scheduled
         logger.info("Session closed")
         session_closed.set()
         if watchdog_task and not watchdog_task.done():
             watchdog_task.cancel()
+        if silence_watchdog_task and not silence_watchdog_task.done():
+            silence_watchdog_task.cancel()
         # Failsafe: disconnect SIP participant if auto_hangup was never triggered
         # (e.g., agent said "Thank you" without using end_call tool, or call was dropped)
         if not hangup_scheduled:
@@ -572,8 +575,6 @@ async def entrypoint(ctx: JobContext):
             asyncio.create_task(_force_disconnect())
 
     # Wait for SIP participant to connect and audio to be ready BEFORE starting the session.
-    # set_participant must be called before session.start() so the VAD/STT pipeline
-    # subscribes to the correct audio track from the beginning.
     try:
         logger.info("Waiting for SIP participant to connect...")
         participant = await asyncio.wait_for(
@@ -606,6 +607,22 @@ async def entrypoint(ctx: JobContext):
     # so that room_io is initialized with a room reference.
     session.room_io.set_participant(participant.identity)
 
+    async def opening_silence_watchdog():
+        """If nothing is heard within 4s of connect, assume a human picked up silently
+        and trigger the opening greeting. Real IVRs always speak within 1-2s."""
+        await asyncio.sleep(4.0)
+        if session.userdata.get("mode", "ivr") == "ivr" and not ivr_prompt_history:
+            if session_closed.is_set():
+                return
+            logger.info(f"[{call_id}] No audio heard after 4s — triggering opening greeting")
+            session.userdata["mode"] = "human"
+            session.userdata["human_mode_initialized"] = True
+            await agent.update_instructions(get_system_prompt(claim_data))
+            session.generate_reply(
+                instructions=f'Nobody has spoken yet. Say EXACTLY: "Hi, this is {os.getenv("AGENT_NAME", "Sarah")} from {os.getenv("PROVIDER_NAME", "ABC Medical Group")}. Is this the claims department?" — nothing else.'
+            )
+
+    silence_watchdog_task = asyncio.create_task(opening_silence_watchdog())
     watchdog_task = asyncio.create_task(ivr_timeout_watchdog())
     await session_closed.wait()
 

@@ -19,7 +19,7 @@ from livekit.agents import (
     TurnHandlingOptions,
     function_tool,
 )
-from livekit.plugins import deepgram, elevenlabs, openai, silero
+from livekit.plugins import cartesia, deepgram, elevenlabs, openai, silero
 
 logger = logging.getLogger("claim-agent")
 logger.setLevel(logging.INFO)
@@ -40,9 +40,11 @@ def get_tts():
     ElevenLabs WebSocket streaming fails on Railway (Debian/Python 3.13)
     so Deepgram is the default for deployed environments.
     Set TTS_PROVIDER=elevenlabs for local development.
+    Set TTS_PROVIDER=cartesia for lowest latency (~75ms TTFB, Railway-compatible).
     """
     provider = os.getenv("TTS_PROVIDER", "deepgram")
     eleven_key = os.getenv("ELEVEN_API_KEY", "")
+    cartesia_key = os.getenv("CARTESIA_API_KEY", "")
     if provider == "elevenlabs" and eleven_key:
         tts = elevenlabs.TTS(
             voice_id=os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku"),
@@ -56,6 +58,17 @@ def get_tts():
             ),
         )
         logger.info("TTS: ElevenLabs")
+        return tts
+    if provider == "cartesia" and cartesia_key:
+        # Recommended Cartesia voices:
+        #   79a125e8-cd45-4c13-8a67-188112f4dd22 — British Reading Lady (calm, professional, default)
+        #   a0e99841-438c-4a64-b679-ae501e7d6091 — Barbershop Man (warm, natural)
+        tts = cartesia.TTS(
+            model="sonic-3",
+            voice=os.getenv("TTS_VOICE_CARTESIA", "79a125e8-cd45-4c13-8a67-188112f4dd22"),
+            api_key=cartesia_key,
+        )
+        logger.info("TTS: Cartesia Sonic")
         return tts
     # Recommended voices (all aura-2):
     #   asteria-en — warm, natural, best for phone calls (default)

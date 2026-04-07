@@ -608,19 +608,21 @@ async def entrypoint(ctx: JobContext):
     session.room_io.set_participant(participant.identity)
 
     async def opening_silence_watchdog():
-        """If nothing is heard within 4s of connect, assume a human picked up silently
+        """If nothing is heard within 1.5s of connect, assume a human picked up silently
         and trigger the opening greeting. Real IVRs always speak within 1-2s."""
-        await asyncio.sleep(4.0)
+        await asyncio.sleep(1.5)
         if session.userdata.get("mode", "ivr") == "ivr" and not ivr_prompt_history:
             if session_closed.is_set():
                 return
-            logger.info(f"[{call_id}] No audio heard after 4s — triggering opening greeting")
+            logger.info(f"[{call_id}] No audio heard after 1.5s — triggering opening greeting")
             session.userdata["mode"] = "human"
             session.userdata["human_mode_initialized"] = True
-            await agent.update_instructions(get_system_prompt(claim_data))
+            # Fire greeting immediately; update instructions concurrently (greeting turn
+            # uses its own instructions= parameter so instruction timing doesn't matter here)
             session.generate_reply(
                 instructions=f'Nobody has spoken yet. Say EXACTLY: "Hi, this is {os.getenv("AGENT_NAME", "Sarah")} from {os.getenv("PROVIDER_NAME", "ABC Medical Group")}. Is this the claims department?" — nothing else.'
             )
+            asyncio.create_task(agent.update_instructions(get_system_prompt(claim_data)))
 
     silence_watchdog_task = asyncio.create_task(opening_silence_watchdog())
     watchdog_task = asyncio.create_task(ivr_timeout_watchdog())

@@ -29,6 +29,10 @@ if not logger.handlers:
     _handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s", "%Y-%m-%d %H:%M:%S"))
     logger.addHandler(_handler)
 
+# Suppress Cartesia flush_done warnings — these are informational protocol messages
+# from a newer Cartesia API version that the plugin doesn't explicitly handle yet.
+logging.getLogger("livekit.plugins.cartesia").setLevel(logging.ERROR)
+
 _SAFE_FILENAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
 
@@ -664,6 +668,12 @@ async def entrypoint(ctx: JobContext):
     # so that room_io is initialized with a room reference.
     session.room_io.set_participant(participant.identity)
 
+    # Pre-load the human-mode system prompt immediately after session start.
+    # This runs concurrently while we wait for the 1.5s silence watchdog, so by
+    # the time the greeting fires the LLM context is already warm — shaves ~1-2s
+    # off the first-turn latency.
+    asyncio.create_task(agent.update_instructions(get_system_prompt(claim_data)))
+
     async def opening_silence_watchdog():
         """If nothing is heard within 1.5s of connect, assume a human picked up silently
         and trigger the opening greeting. Real IVRs always speak within 1-2s."""
@@ -674,12 +684,9 @@ async def entrypoint(ctx: JobContext):
             logger.info(f"[{call_id}] No audio heard after 1.5s — triggering opening greeting")
             session.userdata["mode"] = "human"
             session.userdata["human_mode_initialized"] = True
-            # Fire greeting immediately; update instructions concurrently (greeting turn
-            # uses its own instructions= parameter so instruction timing doesn't matter here)
             session.generate_reply(
                 instructions=f'Nobody has spoken yet. Say EXACTLY: "Hi, this is {os.getenv("AGENT_NAME", "Sarah")} from {os.getenv("PROVIDER_NAME", "ABC Medical Group")}. Is this the claims department?" — nothing else.'
             )
-            asyncio.create_task(agent.update_instructions(get_system_prompt(claim_data)))
 
     async def human_silence_watchdog():
         """In human mode: if the agent asked something and the human hasn't replied

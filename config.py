@@ -16,8 +16,11 @@ LIVEKIT_API_SECRET = os.getenv("LIVEKIT_API_SECRET", "")
 LIVEKIT_SIP_TRUNK_ID = os.getenv("LIVEKIT_SIP_TRUNK_ID", "")
 
 # --- LLM ---
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+CEREBRAS_API_KEY = os.getenv("CEREBRAS_API_KEY", "")
+CEREBRAS_MODEL = os.getenv("CEREBRAS_MODEL", "llama-3.3-70b")
 
 # --- STT ---
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
@@ -26,6 +29,8 @@ DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "")
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "deepgram")
 ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY", "")
 ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku")
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "")
+TTS_VOICE_CARTESIA = os.getenv("TTS_VOICE_CARTESIA", "79a125e8-cd45-4c13-8a67-188112f4dd22")
 
 # --- Agent ---
 AGENT_NAME = os.getenv("AGENT_NAME", "Sarah")
@@ -95,7 +100,12 @@ _REQUIRED = {
 
 
 def validate():
-    missing = [name for name, val in _REQUIRED.items() if not val]
+    required = dict(_REQUIRED)
+    if TTS_PROVIDER == "cartesia":
+        required["CARTESIA_API_KEY"] = CARTESIA_API_KEY
+    if LLM_PROVIDER == "cerebras":
+        required["CEREBRAS_API_KEY"] = CEREBRAS_API_KEY
+    missing = [name for name, val in required.items() if not val]
     if missing:
         logger.error(
             "Missing required environment variables: %s. "

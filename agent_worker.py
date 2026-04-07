@@ -312,15 +312,28 @@ async def entrypoint(ctx: JobContext):
     logger.info(f"[{call_id}] Claim: {claim_number}")
     transcript = CallTranscript()
 
-    # Groq — fastest model with tool calling
-    groq_key = os.getenv("GROQ_API_KEY")
-    if not groq_key:
-        logger.error("GROQ_API_KEY not set — agent cannot function")
-    llm = openai.LLM(
-        model=os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
-        base_url="https://api.groq.com/openai/v1",
-        api_key=groq_key,
-    )
+    # LLM selection: Cerebras (faster, ~100-200ms TTFT) or Groq (default)
+    llm_provider = os.getenv("LLM_PROVIDER", "groq")
+    if llm_provider == "cerebras":
+        cerebras_key = os.getenv("CEREBRAS_API_KEY")
+        if not cerebras_key:
+            logger.error("CEREBRAS_API_KEY not set — agent cannot function")
+        llm = openai.LLM(
+            model=os.getenv("CEREBRAS_MODEL", "llama-3.3-70b"),
+            base_url="https://api.cerebras.ai/v1",
+            api_key=cerebras_key,
+        )
+        logger.info(f"LLM: Cerebras {os.getenv('CEREBRAS_MODEL', 'llama-3.3-70b')}")
+    else:
+        groq_key = os.getenv("GROQ_API_KEY")
+        if not groq_key:
+            logger.error("GROQ_API_KEY not set — agent cannot function")
+        llm = openai.LLM(
+            model=os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
+            base_url="https://api.groq.com/openai/v1",
+            api_key=groq_key,
+        )
+        logger.info(f"LLM: Groq {os.getenv('GROQ_MODEL', 'meta-llama/llama-4-scout-17b-16e-instruct')}")
 
     # STT model selection:
     #   nova-2-phonecall — default, tuned for telephone/call-center audio

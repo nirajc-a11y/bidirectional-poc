@@ -35,6 +35,14 @@ logging.getLogger("livekit.plugins.cartesia").setLevel(logging.ERROR)
 
 _SAFE_FILENAME_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
+# Phrases that indicate the rep is looking something up and needs more time.
+# When detected, silence thresholds are extended to avoid premature check-ins.
+_HOLD_PHRASES = (
+    "minute", "second", "moment", "hold", "wait",
+    "one sec", "give me", "hang on", "just a", "looking",
+    "pulling", "checking", "let me", "bear with",
+)
+
 
 # --- TTS ---
 
@@ -483,6 +491,11 @@ async def entrypoint(ctx: JobContext):
             last_agent_spoke = now
         else:
             last_human_spoke = now
+            # If the rep announced they need time, record it so the silence
+            # watchdog uses extended thresholds instead of interrupting them.
+            if any(p in content.lower() for p in _HOLD_PHRASES):
+                session.userdata["hold_requested_at"] = now
+                logger.info(f"[{call_id}] Hold phrase detected — extending silence thresholds")
 
         # Publish transcript line to room for real-time relay to dashboard
         try:
@@ -668,11 +681,10 @@ async def entrypoint(ctx: JobContext):
     # so that room_io is initialized with a room reference.
     session.room_io.set_participant(participant.identity)
 
-    # Pre-load the human-mode system prompt immediately after session start.
-    # This runs concurrently while we wait for the 1.5s silence watchdog, so by
-    # the time the greeting fires the LLM context is already warm — shaves ~1-2s
-    # off the first-turn latency.
-    asyncio.create_task(agent.update_instructions(get_system_prompt(claim_data)))
+    # Load the human-mode system prompt before starting watchdogs.
+    # Awaiting ensures the LLM context is fully warm before the 1.5s silence
+    # countdown begins — so when generate_reply() fires, inference starts immediately.
+    await agent.update_instructions(get_system_prompt(claim_data))
 
     async def opening_silence_watchdog():
         """If nothing is heard within 1.5s of connect, assume a human picked up silently
@@ -691,9 +703,13 @@ async def entrypoint(ctx: JobContext):
     async def human_silence_watchdog():
         """In human mode: if the agent asked something and the human hasn't replied
         within SILENCE_CHECK_AFTER seconds, prompt once. If still no reply after
-        SILENCE_HANGUP_AFTER seconds total, end the call."""
-        SILENCE_CHECK_AFTER = 6.0   # seconds after agent spoke before first check-in
-        SILENCE_HANGUP_AFTER = 14.0  # seconds after agent spoke before giving up
+        SILENCE_HANGUP_AFTER seconds total, end the call.
+        When the rep announces they need time ("give me a minute", "hold on", etc.),
+        thresholds are extended so the agent waits patiently."""
+        SILENCE_CHECK_AFTER = 6.0    # seconds before first check-in (normal)
+        SILENCE_HANGUP_AFTER = 14.0  # seconds before giving up (normal)
+        HOLD_CHECK_AFTER = 30.0      # seconds before check-in after a hold phrase
+        HOLD_HANGUP_AFTER = 60.0     # seconds before giving up after a hold phrase
         checkin_done = False
         while not session_closed.is_set():
             await asyncio.sleep(1.0)
@@ -709,12 +725,17 @@ async def entrypoint(ctx: JobContext):
                 # Human replied — reset
                 checkin_done = False
                 continue
-            if silence >= SILENCE_HANGUP_AFTER:
-                logger.warning(f"[{call_id}] No response after {SILENCE_HANGUP_AFTER}s — ending call")
+            # Use extended thresholds if rep recently said a hold phrase
+            hold_at = session.userdata.get("hold_requested_at", 0.0)
+            on_hold = hold_at > last_agent_spoke  # hold phrase came after agent's last question
+            check_after = HOLD_CHECK_AFTER if on_hold else SILENCE_CHECK_AFTER
+            hangup_after = HOLD_HANGUP_AFTER if on_hold else SILENCE_HANGUP_AFTER
+            if silence >= hangup_after:
+                logger.warning(f"[{call_id}] No response after {hangup_after}s — ending call")
                 session.generate_reply(instructions="No response for a long time. Say 'Having trouble hearing you — I'll try calling back.' then call end_call.")
                 checkin_done = False
                 break
-            if silence >= SILENCE_CHECK_AFTER and not checkin_done:
+            if silence >= check_after and not checkin_done:
                 checkin_done = True
                 logger.info(f"[{call_id}] Silence {silence:.1f}s — asking check-in")
                 session.generate_reply(instructions='Say EXACTLY: "Sorry, are you still there?" — nothing else.')

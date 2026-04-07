@@ -134,7 +134,7 @@ async def lifespan(app: FastAPI):
         api_key=config.LIVEKIT_API_KEY,
         api_secret=config.LIVEKIT_API_SECRET,
         port=0,
-        num_idle_processes=0,
+        num_idle_processes=1,
     )
     agent_server.rtc_session(entrypoint)
     is_dev = os.getenv("RAILWAY_ENVIRONMENT") is None

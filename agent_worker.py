@@ -138,7 +138,8 @@ async def send_dtmf(ctx: RunContext, digit: str):
     if digit not in "0123456789*#":
         return f"Invalid digit '{digit}'. Must be 0-9, *, or #."
     try:
-        await ctx.room.local_participant.publish_dtmf(digit)
+        room = ctx.session.userdata["room"]
+        await room.local_participant.publish_dtmf(digit)
         logger.info(f"DTMF sent: {digit}")
         return f"Pressed {digit}. Wait 1-2 seconds then listen for the next prompt."
     except Exception as e:
@@ -308,32 +309,54 @@ async def entrypoint(ctx: JobContext):
         api_key=groq_key,
     )
 
-    agent = Agent(
-        instructions=get_ivr_prompt(claim_data),
-        stt=deepgram.STT(
-            model=os.getenv("STT_MODEL", "nova-3"),  # set STT_MODEL=flux to enable Flux (semantic turn detection)
+    # STT model selection:
+    #   nova-2-phonecall — default, tuned for telephone/call-center audio
+    #   nova-3           — higher accuracy, general purpose
+    #   flux             — Deepgram semantic turn detection (uses STTv2 / v2/listen endpoint)
+    stt_model = os.getenv("STT_MODEL", "nova-2-phonecall")
+    use_flux = stt_model == "flux"
+    turn_det = "stt" if use_flux else "vad"
+    logger.info(f"STT model: {stt_model}, turn_detection: {turn_det}")
+
+    _KEYTERMS = ["claim number", "member ID", "date of service", "CPT code",
+                 "approved", "denied", "pending", "appeal deadline",
+                 "reference number", "explanation of benefits"]
+
+    if use_flux:
+        stt = deepgram.STTv2(
+            model="flux-general-en",
+            keyterm=_KEYTERMS,
+            eot_threshold=0.7,        # end-of-turn confidence (default 0.7)
+            eager_eot_threshold=0.5,  # fire early EOT for faster agent response
+            eot_timeout_ms=1000,      # max wait after speech before forcing EOT (default 5000)
+        )
+    else:
+        stt = deepgram.STT(
+            model=stt_model,
             language="en",
             no_delay=True,
             smart_format=True,
             punctuate=True,
-            keyterm=["claim number", "member ID", "date of service", "CPT code",
-                     "approved", "denied", "pending", "appeal deadline",
-                     "reference number", "explanation of benefits"],
-        ),
+            keyterm=_KEYTERMS,
+        )
+
+    agent = Agent(
+        instructions=get_ivr_prompt(claim_data),
+        stt=stt,
         llm=llm,
         tts=get_tts(),
         vad=silero.VAD.load(),
         tools=[send_dtmf, declare_human_reached, declare_ivr_failed, save_claim_status, confirm_details, mark_unable_to_verify, end_call],
         turn_handling=TurnHandlingOptions(
-            turn_detection="vad",
+            turn_detection=turn_det,
             endpointing=EndpointingOptions(
-                min_delay=0.3,   # faster pickup when rep finishes speaking
-                max_delay=1.5,   # insurance reps often pause mid-sentence — give them room
+                min_delay=0.15,  # was 0.3 — cuts ~150ms per turn
+                max_delay=1.0,   # was 1.5 — faster pickup after pauses
             ),
             interruption=InterruptionOptions(
                 enabled=True,
                 mode="adaptive",             # won't fire on filler words ("um", "uh", "hold on")
-                min_duration=0.4,
+                min_duration=0.25,           # was 0.4 — agent stops faster when interrupted
                 min_words=1,
                 resume_false_interruption=True,
             ),
@@ -342,7 +365,8 @@ async def entrypoint(ctx: JobContext):
     )
 
     session = AgentSession(
-        userdata={"claim_results": {}, "confirmed": False},
+        userdata={"claim_results": {}, "confirmed": False, "room": ctx.room},
+        preemptive_generation=True,  # TTS starts from partial LLM output — first audio ~200–400ms earlier
     )
     hangup_scheduled = False
     goodbye_said = False

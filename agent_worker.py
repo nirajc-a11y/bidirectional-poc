@@ -364,7 +364,7 @@ async def entrypoint(ctx: JobContext):
             no_delay=True,
             smart_format=True,
             punctuate=True,
-            **({"keyterm": _KEYTERMS} if is_nova3 else {"keywords": _KEYTERMS}),
+            **({"keyterm": _KEYTERMS} if is_nova3 else {"keywords": [(kw, 1.0) for kw in _KEYTERMS]}),
         )
 
     agent = Agent(

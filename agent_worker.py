@@ -229,11 +229,6 @@ FILLER WORDS:
 - "um", "uh", "so", "let me", "one moment", "hold on", "let me check" = the rep is still formulating. Wait silently.
 - Only re-ask after 8 full seconds of silence following a filler word.
 
-SILENCE HANDLING:
-- 3 seconds of silence after your question → ask once: "Sorry, are you still there?"
-- 6 seconds total → say: "I can hear some background — just want to make sure you can hear me."
-- 10 seconds total → say: "Having trouble hearing you — I'll try calling back." then call end_call.
-
 DATA RULES:
 - NEVER guess or assume. Only use what the rep says.
 - Dates: if invalid (e.g. "Feb 29" on a non-leap year), ask: "Sorry, did you mean a different date?"
@@ -408,7 +403,7 @@ async def entrypoint(ctx: JobContext):
 
     @session.on("conversation_item_added")
     def on_item(event):
-        nonlocal goodbye_said, escape_attempts, ivr_end_time
+        nonlocal goodbye_said, escape_attempts, ivr_end_time, last_human_spoke, last_agent_spoke
         item = event.item
         role = getattr(item, "role", "unknown")
         content = ""
@@ -427,6 +422,12 @@ async def entrypoint(ctx: JobContext):
         speaker = "Agent" if role == "assistant" else "Human"
         transcript.add_entry(speaker, content)
         logger.info(f"{speaker}: {content}")
+
+        now = asyncio.get_event_loop().time()
+        if role == "assistant":
+            last_agent_spoke = now
+        else:
+            last_human_spoke = now
 
         # Publish transcript line to room for real-time relay to dashboard
         try:
@@ -538,16 +539,21 @@ async def entrypoint(ctx: JobContext):
     session_closed = asyncio.Event()
     watchdog_task: asyncio.Task | None = None
     silence_watchdog_task: asyncio.Task | None = None
+    human_silence_task: asyncio.Task | None = None
+    last_human_spoke: float = 0.0   # asyncio.get_event_loop().time() of last human transcript
+    last_agent_spoke: float = 0.0   # asyncio.get_event_loop().time() of last agent transcript
 
     @session.on("close")
     def on_close(*a):
-        nonlocal watchdog_task, silence_watchdog_task, hangup_scheduled
+        nonlocal watchdog_task, silence_watchdog_task, human_silence_task, hangup_scheduled
         logger.info("Session closed")
         session_closed.set()
         if watchdog_task and not watchdog_task.done():
             watchdog_task.cancel()
         if silence_watchdog_task and not silence_watchdog_task.done():
             silence_watchdog_task.cancel()
+        if human_silence_task and not human_silence_task.done():
+            human_silence_task.cancel()
         # Failsafe: disconnect SIP participant if auto_hangup was never triggered
         # (e.g., agent said "Thank you" without using end_call tool, or call was dropped)
         if not hangup_scheduled:
@@ -624,7 +630,39 @@ async def entrypoint(ctx: JobContext):
             )
             asyncio.create_task(agent.update_instructions(get_system_prompt(claim_data)))
 
+    async def human_silence_watchdog():
+        """In human mode: if the agent asked something and the human hasn't replied
+        within SILENCE_CHECK_AFTER seconds, prompt once. If still no reply after
+        SILENCE_HANGUP_AFTER seconds total, end the call."""
+        SILENCE_CHECK_AFTER = 6.0   # seconds after agent spoke before first check-in
+        SILENCE_HANGUP_AFTER = 14.0  # seconds after agent spoke before giving up
+        checkin_done = False
+        while not session_closed.is_set():
+            await asyncio.sleep(1.0)
+            if session.userdata.get("mode") != "human" or goodbye_said:
+                checkin_done = False
+                continue
+            now = asyncio.get_event_loop().time()
+            # Only count silence when agent has spoken and is waiting for a reply
+            if last_agent_spoke == 0.0:
+                continue
+            silence = now - max(last_human_spoke, last_agent_spoke)
+            if last_human_spoke >= last_agent_spoke:
+                # Human replied — reset
+                checkin_done = False
+                continue
+            if silence >= SILENCE_HANGUP_AFTER:
+                logger.warning(f"[{call_id}] No response after {SILENCE_HANGUP_AFTER}s — ending call")
+                session.generate_reply(instructions="No response for a long time. Say 'Having trouble hearing you — I'll try calling back.' then call end_call.")
+                checkin_done = False
+                break
+            if silence >= SILENCE_CHECK_AFTER and not checkin_done:
+                checkin_done = True
+                logger.info(f"[{call_id}] Silence {silence:.1f}s — asking check-in")
+                session.generate_reply(instructions='Say EXACTLY: "Sorry, are you still there?" — nothing else.')
+
     silence_watchdog_task = asyncio.create_task(opening_silence_watchdog())
+    human_silence_task = asyncio.create_task(human_silence_watchdog())
     watchdog_task = asyncio.create_task(ivr_timeout_watchdog())
     await session_closed.wait()
 

@@ -331,13 +331,14 @@ async def entrypoint(ctx: JobContext):
             eot_timeout_ms=1000,      # max wait after speech before forcing EOT (default 5000)
         )
     else:
+        is_nova3 = stt_model.startswith("nova-3")
         stt = deepgram.STT(
             model=stt_model,
             language="en",
             no_delay=True,
             smart_format=True,
             punctuate=True,
-            keyterm=_KEYTERMS,
+            **({"keyterm": _KEYTERMS} if is_nova3 else {"keywords": _KEYTERMS}),
         )
 
     agent = Agent(

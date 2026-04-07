@@ -71,6 +71,16 @@ def get_tts():
         )
         logger.info("TTS: ElevenLabs")
         return tts
+    if provider == "groq_orpheus":
+        from livekit.plugins import groq as groq_plugin  # livekit-plugins-groq
+        # Recommended PlayAI voices: Aaliyah-PlayAI (warm, professional), Fritz-PlayAI (male, clear)
+        tts = groq_plugin.TTS(
+            model=os.getenv("GROQ_TTS_MODEL", "playai-tts"),
+            voice=os.getenv("GROQ_TTS_VOICE", "Aaliyah-PlayAI"),
+            api_key=os.getenv("GROQ_API_KEY", ""),
+        )
+        logger.info("TTS: Groq PlayAI")
+        return tts
     if provider == "cartesia" and cartesia_key:
         # Recommended Cartesia voices:
         #   79a125e8-cd45-4c13-8a67-188112f4dd22 — British Reading Lady (calm, professional, default)
@@ -155,16 +165,25 @@ async def end_call(ctx: RunContext, reason: str = ""):
     return "Call ending. Say a brief goodbye."
 
 
+_DTMF_CODES = {
+    "0": 0, "1": 1, "2": 2, "3": 3, "4": 4,
+    "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+    "*": 10, "#": 11,
+}
+
 @function_tool(
     name="send_dtmf",
     description="Press a phone keypad digit (DTMF tone). Use to navigate IVR menus. digit must be 0-9, *, or #.",
 )
 async def send_dtmf(ctx: RunContext, digit: str):
-    if digit not in "0123456789*#":
+    if ctx.session.userdata.get("mode") == "human":
+        logger.warning(f"DTMF blocked — already in human mode (digit={digit})")
+        return "Cannot press digits — a human is on the line. Continue the claim verification conversation."
+    if digit not in _DTMF_CODES:
         return f"Invalid digit '{digit}'. Must be 0-9, *, or #."
     try:
         room = ctx.session.userdata["room"]
-        await room.local_participant.publish_dtmf(digit)
+        await room.local_participant.publish_dtmf(code=_DTMF_CODES[digit], digit=digit)
         logger.info(f"DTMF sent: {digit}")
         return f"Pressed {digit}. Wait 1-2 seconds then listen for the next prompt."
     except Exception as e:
@@ -206,24 +225,34 @@ def get_ivr_prompt(claim_data: dict) -> str:
 You just dialed an insurance company. The call has connected. Wait and listen.
 
 STEP 1 — IDENTIFY WHAT YOU HEAR:
-- If you hear a HUMAN voice answering (natural speech like "Claims department, how can I help?"), call declare_human_reached() IMMEDIATELY. Do NOT press any digits first.
-- If you hear an AUTOMATED voice reading menu options (robotic, listing "press 1 for...", "press 2 for..."), you are in an IVR. Navigate it using send_dtmf.
-- If you hear silence or ringing, wait up to 5 seconds before acting.
 
-NAVIGATING AN IVR (only if you hear automated prompts):
+A HUMAN is speaking if:
+- They say anything natural like "Yes", "Claims department", "How can I help?", "Hello?", "Yes it's approved", or any direct reply to you.
+- The speech sounds like a real person having a conversation.
+→ Call declare_human_reached() IMMEDIATELY. Do NOT press any digits. Do NOT speak first.
+
+An IVR / AUTOMATED SYSTEM is speaking if:
+- You hear a robotic voice listing menu options: "Press 1 for...", "For claims, press 2...", "Please hold while..."
+- The voice is clearly pre-recorded and not responding to you personally.
+→ Navigate using send_dtmf only.
+
+If you hear silence or ringing: wait up to 5 seconds before acting.
+
+RULE: When in doubt — if there is ANY chance a human is speaking — call declare_human_reached() first. You can always navigate later. You cannot undo pressing a DTMF digit at a human.
+
+NAVIGATING AN IVR (only if you are 100% certain you hear automated prompts):
 - Listen to each prompt fully before pressing anything.
 - Press the digit most likely to reach "claims", "claim status", "billing", or "insurance verification".
 - If no option matches, press 0 to reach an operator.
-- The moment the automated voice stops and a HUMAN answers, call declare_human_reached().
-- If the same automated prompt repeats twice, you are stuck — call declare_ivr_failed("stuck in loop").
+- The moment a HUMAN answers, call declare_human_reached().
+- If the same automated prompt repeats twice, call declare_ivr_failed("stuck in loop").
 - Never press a digit you have already tried.
 
 CRITICAL:
-- Do NOT press any digits if a human has already answered.
+- Do NOT press any digits if a human has already answered or is speaking.
 - Do NOT speak or introduce yourself while navigating an IVR.
-- Only use send_dtmf when you are certain you are hearing an automated phone menu.
-- Call declare_human_reached() ONCE only — do not call it again if already called.
-- NEVER narrate what you are doing ("I hear a human...", "I will call..."). Just call the tool silently.
+- Call declare_human_reached() ONCE only.
+- NEVER narrate what you are doing. Just call the tool silently.
 
 CLAIM (for reference only — do NOT share during IVR):
 Patient: {claim_data.get('patient_name', 'N/A')} | Claim#: {claim_data.get('claim_number', 'N/A')}
@@ -334,6 +363,7 @@ async def entrypoint(ctx: JobContext):
             model=os.getenv("CEREBRAS_MODEL", "llama-3.3-70b"),
             base_url="https://api.cerebras.ai/v1",
             api_key=cerebras_key,
+            temperature=0.1,
         )
         logger.info(f"LLM: Cerebras {os.getenv('CEREBRAS_MODEL', 'llama-3.3-70b')}")
     else:
@@ -344,6 +374,7 @@ async def entrypoint(ctx: JobContext):
             model=os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct"),
             base_url="https://api.groq.com/openai/v1",
             api_key=groq_key,
+            temperature=0.1,
         )
         logger.info(f"LLM: Groq {os.getenv('GROQ_MODEL', 'meta-llama/llama-4-scout-17b-16e-instruct')}")
 
@@ -366,7 +397,7 @@ async def entrypoint(ctx: JobContext):
             keyterm=_KEYTERMS,
             eot_threshold=0.7,        # end-of-turn confidence (default 0.7)
             eager_eot_threshold=0.5,  # fire early EOT for faster agent response
-            eot_timeout_ms=1000,      # max wait after speech before forcing EOT (default 5000)
+            eot_timeout_ms=700,       # max wait after speech before forcing EOT (default 5000; 700ms saves ~300ms per turn)
         )
     else:
         is_nova3 = stt_model.startswith("nova-3")
@@ -384,7 +415,7 @@ async def entrypoint(ctx: JobContext):
         stt=stt,
         llm=llm,
         tts=get_tts(),
-        vad=silero.VAD.load(),
+        vad=silero.VAD.load(min_silence_duration=0.3, activation_threshold=0.5),
         tools=[send_dtmf, declare_human_reached, declare_ivr_failed, save_claim_status, confirm_details, mark_unable_to_verify, end_call],
         turn_handling=TurnHandlingOptions(
             turn_detection=turn_det,

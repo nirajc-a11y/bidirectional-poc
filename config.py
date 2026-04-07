@@ -31,6 +31,8 @@ ELEVEN_API_KEY = os.getenv("ELEVEN_API_KEY", "")
 ELEVEN_VOICE_ID = os.getenv("ELEVEN_VOICE_ID", "pFZP5JQG7iQjIQuC4Bku")
 CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY", "")
 TTS_VOICE_CARTESIA = os.getenv("TTS_VOICE_CARTESIA", "79a125e8-cd45-4c13-8a67-188112f4dd22")
+GROQ_TTS_MODEL = os.getenv("GROQ_TTS_MODEL", "playai-tts")
+GROQ_TTS_VOICE = os.getenv("GROQ_TTS_VOICE", "Aaliyah-PlayAI")
 
 # --- Agent ---
 AGENT_NAME = os.getenv("AGENT_NAME", "Sarah")
